@@ -279,7 +279,6 @@
    "default": "0",
    "fieldname": "is_old_data_migrated",
    "fieldtype": "Check",
-   "hidden": 1,
    "label": "Is old data migrated"
   },
   {
@@ -392,7 +391,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2023-10-24 10:38:49.247431",
+ "modified": "2025-01-09 13:16:38.665250",
  "modified_by": "Administrator",
  "module": "shopify",
  "name": "Shopify Setting",
