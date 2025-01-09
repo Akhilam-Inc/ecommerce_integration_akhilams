@@ -79,30 +79,65 @@ def create_sales_order(shopify_order, setting, company=None):
 		shopify_customer_full_name = ""
 
 	#Create billing address with below sample data
+	# if shopify_order.get("billing_address"):
+	# 	address_line_1 = shopify_order.get("billing_address").get("address1", "")
+	# 	address_line_2 = shopify_order.get("billing_address").get("address2", "")
+	# 	city = shopify_order.get("billing_address").get("city", "")
+	# 	zip_code = shopify_order.get("billing_address").get("zip", "")
+	# 	province = shopify_order.get("billing_address").get("province", "")
+	# 	country = shopify_order.get("billing_address").get("country", "")
+	# 	phone = shopify_order.get("billing_address").get("phone", "")
+	# 	shopify_billing_address = address_line_1 + ",\n" + address_line_2 + ",\n" + city + ",\n" + zip_code + ",\n" + province + ",\n" + country + ",\n" + phone
+	# else:
+	# 	shopify_billing_address = ""
 	if shopify_order.get("billing_address"):
-		address_line_1 = shopify_order.get("billing_address").get("address1", "")
-		address_line_2 = shopify_order.get("billing_address").get("address2", "")
-		city = shopify_order.get("billing_address").get("city", "")
-		zip_code = shopify_order.get("billing_address").get("zip", "")
-		province = shopify_order.get("billing_address").get("province", "")
-		country = shopify_order.get("billing_address").get("country", "")
-		phone = shopify_order.get("billing_address").get("phone", "")
-		shopify_billing_address = address_line_1 + ",\n" + address_line_2 + ",\n" + city + ",\n" + zip_code + ",\n" + province + ",\n" + country + ",\n" + phone
+		billing_address = shopify_order.get("billing_address")
+		address_line_1 = str(billing_address.get("address1", "") or "")
+		address_line_2 = str(billing_address.get("address2", "") or "")
+		city = str(billing_address.get("city", "") or "")
+		zip_code = str(billing_address.get("zip", "") or "")
+		province = str(billing_address.get("province", "") or "")
+		country = str(billing_address.get("country", "") or "")
+		phone = str(billing_address.get("phone", "") or "")
+
+		# Join non-empty parts with a newline
+		shopify_billing_address = ",\n".join(
+			filter(None, [address_line_1, address_line_2, city, zip_code, province, country, phone])
+		)
 	else:
 		shopify_billing_address = ""
 
+
+
 	#Create shipping address with below sample data
+	# if shopify_order.get("shipping_address"):
+	# 	address_line_1 = shopify_order.get("shipping_address").get("address1", "")
+	# 	address_line_2 = shopify_order.get("shipping_address").get("address2", "")
+	# 	city = shopify_order.get("shipping_address").get("city", "")
+	# 	zip_code = shopify_order.get("shipping_address").get("zip", "")
+	# 	province = shopify_order.get("shipping_address").get("province", "")
+	# 	country = shopify_order.get("shipping_address").get("country", "")
+	# 	phone = shopify_order.get("shipping_address").get("phone", "")
+	# 	shopify_shipping_address = address_line_1 + ",\n" + address_line_2 + ",\n" + city + ",\n" + zip_code + ",\n" + province + ",\n" + country + ",\n" + phone
+	# else:
+	# 	shopify_shipping_address = ""
 	if shopify_order.get("shipping_address"):
-		address_line_1 = shopify_order.get("shipping_address").get("address1", "")
-		address_line_2 = shopify_order.get("shipping_address").get("address2", "")
-		city = shopify_order.get("shipping_address").get("city", "")
-		zip_code = shopify_order.get("shipping_address").get("zip", "")
-		province = shopify_order.get("shipping_address").get("province", "")
-		country = shopify_order.get("shipping_address").get("country", "")
-		phone = shopify_order.get("shipping_address").get("phone", "")
-		shopify_shipping_address = address_line_1 + ",\n" + address_line_2 + ",\n" + city + ",\n" + zip_code + ",\n" + province + ",\n" + country + ",\n" + phone
+		shipping_address = shopify_order.get("shipping_address")
+		address_line_1 = shipping_address.get("address1", "") or ""
+		address_line_2 = shipping_address.get("address2", "") or ""
+		city = shipping_address.get("city", "") or ""
+		zip_code = shipping_address.get("zip", "") or ""
+		province = shipping_address.get("province", "") or ""
+		country = shipping_address.get("country", "") or ""
+		phone = shipping_address.get("phone", "") or ""
+		
+		# Construct the shipping address string
+		address_parts = [address_line_1, address_line_2, city, zip_code, province, country, phone]
+		address_parts = [part for part in address_parts if part]  # Remove empty or None values
+		shopify_shipping_address = ",\n".join(address_parts)
 	else:
 		shopify_shipping_address = ""
+
 	
 
 	if not so:
