@@ -46,7 +46,7 @@ class ShopifyCustomer(EcommerceCustomer):
 	def create_customer_address(
 		self,
 		customer_id,
-		shopify_address: Dict[str, Any],
+		shopify_address: dict[str, Any],
 		address_type: str = "Billing",
 		email: str | None = None,
 	) -> None:
@@ -70,12 +70,11 @@ class ShopifyCustomer(EcommerceCustomer):
 	def _update_existing_address(
 		self,
 		customer_id,
-		shopify_address: Dict[str, Any],
+		shopify_address: dict[str, Any],
 		address_type: str = "Billing",
 		email: str | None = None,
 	) -> None:
 		old_address = self.get_customer_address_doc(address_type)
-
 		if not old_address:
 			self.create_customer_address(customer_id, shopify_address, address_type, email)
 		else:
