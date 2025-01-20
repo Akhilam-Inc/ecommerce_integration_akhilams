@@ -3,13 +3,13 @@ from typing import Literal, Optional
 
 import frappe
 from frappe import _
+from frappe.contacts.doctype.address.address import get_address_display
 from frappe.utils import cint, cstr, flt, get_datetime, getdate, nowdate
 from shopify.collection import PaginatedIterator
 from shopify.resources import Order
 
 from ecommerce_integrations.shopify.connection import temp_shopify_session
 from ecommerce_integrations.shopify.constants import (
-	CUSTOMER_ID_FIELD,
 	EVENT_MAPPER,
 	ORDER_ID_FIELD,
 	ORDER_ITEM_DISCOUNT_FIELD,
@@ -41,6 +41,14 @@ def sync_sales_order(payload, request_id=None):
 		shopify_customer = order.get("customer") if order.get("customer") is not None else {}
 		shopify_customer["billing_address"] = order.get("billing_address", "")
 		shopify_customer["shipping_address"] = order.get("shipping_address", "")
+		customer_id = shopify_customer.get("id")
+		if customer_id:
+			shopify_platform_customer = ShopifyCustomer(customer_id=customer_id)
+			if not shopify_platform_customer.is_synced():
+				shopify_platform_customer.sync_customer(customer=shopify_customer)
+			else:
+				shopify_platform_customer.update_existing_addresses(shopify_customer)
+
 		create_items_if_not_exist(order)
 
 		setting = frappe.get_doc(SETTING_DOCTYPE)
@@ -66,11 +74,25 @@ def create_order(order, setting, company=None):
 
 
 def create_sales_order(shopify_order, setting, company=None):
-	frappe.log_error(title="Creating Sales Order {}".format(shopify_order.get("id")),message=str(shopify_order))
-	customer = setting.default_customer
-	so = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: shopify_order.get("id")}, "name")
+	from ecommerce_integrations.shopify.customer import (
+		get_shopify_platform_customer_address_doc as platform_customer_address_doc,
+	)
 
-	#Create customer fullname
+	customer = setting.default_customer
+
+	billing_address = None
+	billing_address_display = None
+	shipping_address = None
+	shipping_address_display = None
+	if shopify_order.get("customer", {}):
+		if customer_id := shopify_order.get("customer", {}).get("id"):
+			if billing_address := platform_customer_address_doc(customer_id, address_type="Billing"):
+				billing_address_display = get_address_display(billing_address.as_dict())
+			if shipping_address := platform_customer_address_doc(customer_id, address_type="Shipping"):
+				shipping_address_display = get_address_display(shipping_address.as_dict())
+
+	so = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: shopify_order.get("id")}, "name")
+	# Create customer fullname
 	if shopify_order.get("customer"):
 		first_name = shopify_order.get("customer").get("first_name", "")
 		last_name = shopify_order.get("customer").get("last_name", "")
@@ -78,7 +100,7 @@ def create_sales_order(shopify_order, setting, company=None):
 	else:
 		shopify_customer_full_name = ""
 
-	#Create billing address with below sample data
+	# Create billing address with below sample data
 	# if shopify_order.get("billing_address"):
 	# 	address_line_1 = shopify_order.get("billing_address").get("address1", "")
 	# 	address_line_2 = shopify_order.get("billing_address").get("address2", "")
@@ -107,9 +129,7 @@ def create_sales_order(shopify_order, setting, company=None):
 	else:
 		shopify_billing_address = ""
 
-
-
-	#Create shipping address with below sample data
+	# Create shipping address with below sample data
 	# if shopify_order.get("shipping_address"):
 	# 	address_line_1 = shopify_order.get("shipping_address").get("address1", "")
 	# 	address_line_2 = shopify_order.get("shipping_address").get("address2", "")
@@ -130,15 +150,13 @@ def create_sales_order(shopify_order, setting, company=None):
 		province = shipping_address.get("province", "") or ""
 		country = shipping_address.get("country", "") or ""
 		phone = shipping_address.get("phone", "") or ""
-		
+
 		# Construct the shipping address string
 		address_parts = [address_line_1, address_line_2, city, zip_code, province, country, phone]
 		address_parts = [part for part in address_parts if part]  # Remove empty or None values
 		shopify_shipping_address = ",\n".join(address_parts)
 	else:
 		shopify_shipping_address = ""
-
-	
 
 	if not so:
 		items = get_order_items(
@@ -179,6 +197,13 @@ def create_sales_order(shopify_order, setting, company=None):
 				"items": items,
 				"taxes": taxes,
 				"tax_category": get_dummy_tax_category(),
+				"shopify_customer_id": customer_id,
+				"customer_address": billing_address,
+				"shopify_billing_address": billing_address,
+				"shopify_billing_address_display": billing_address_display,
+				"shipping_address_name": shipping_address,
+				"shopify_shipping_address": shipping_address,
+				"shopify_shipping_address_display": shipping_address_display,
 			}
 		)
 
@@ -459,13 +484,12 @@ def cancel_order(payload, request_id=None):
 @temp_shopify_session
 def sync_old_orders():
 	try:
-		
+
 		frappe.log_error("Syncing Old Orders")
 		shopify_setting = frappe.get_cached_doc(SETTING_DOCTYPE)
 		if not cint(shopify_setting.sync_old_orders):
 			frappe.log_error("Sync Old Orders is disabled")
 			return
-		
 
 		orders = _fetch_old_orders(shopify_setting.old_orders_from, shopify_setting.old_orders_to)
 
@@ -480,7 +504,7 @@ def sync_old_orders():
 		shopify_setting = frappe.get_doc(SETTING_DOCTYPE)
 		shopify_setting.sync_old_orders = 0
 		shopify_setting.save()
-	except Exception as e:
+	except Exception:
 		frappe.log_error(title="Sync Old Orders", message=frappe.get_traceback())
 
 
@@ -489,7 +513,7 @@ def _fetch_old_orders(from_time, to_time):
 	frappe.log_error(title="Fetching Orders from {} to {}".format(str(from_time), str(to_time)))
 	from_time = get_datetime(from_time).astimezone().isoformat()
 	to_time = get_datetime(to_time).astimezone().isoformat()
-	
+
 	orders_iterator = PaginatedIterator(
 		Order.find(created_at_min=from_time, created_at_max=to_time, limit=250)
 	)
