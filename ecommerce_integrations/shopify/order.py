@@ -9,13 +9,15 @@ from shopify.resources import Order
 
 from ecommerce_integrations.shopify.connection import temp_shopify_session
 from ecommerce_integrations.shopify.constants import (
-	CUSTOMER_ID_FIELD,
 	EVENT_MAPPER,
 	ORDER_ID_FIELD,
 	ORDER_ITEM_DISCOUNT_FIELD,
 	ORDER_NUMBER_FIELD,
 	ORDER_STATUS_FIELD,
 	SETTING_DOCTYPE,
+)
+from frappe.contacts.doctype.address.address import (
+	get_address_display
 )
 from ecommerce_integrations.shopify.customer import ShopifyCustomer
 from ecommerce_integrations.shopify.product import create_items_if_not_exist, get_item_code
@@ -43,11 +45,11 @@ def sync_sales_order(payload, request_id=None):
 		shopify_customer["shipping_address"] = order.get("shipping_address", "")
 		customer_id = shopify_customer.get("id")
 		if customer_id:
-			customer = ShopifyCustomer(customer_id=customer_id)
-			if not customer.is_synced():
-				customer.sync_customer(customer=shopify_customer)
+			shopify_platform_customer = ShopifyCustomer(customer_id=customer_id)
+			if not shopify_platform_customer.is_synced():
+				shopify_platform_customer.sync_customer(customer=shopify_customer)
 			else:
-				customer.update_existing_addresses(shopify_customer)
+				shopify_platform_customer.update_existing_addresses(shopify_customer)
 
 		create_items_if_not_exist(order)
 
@@ -74,10 +76,19 @@ def create_order(order, setting, company=None):
 
 
 def create_sales_order(shopify_order, setting, company=None):
+	from ecommerce_integrations.shopify.customer import get_shopify_platform_customer_address_doc as platform_customer_address_doc
 	customer = setting.default_customer
+	
+	billing_address = None
+	billing_address_display = None
+	shipping_address = None
+	shipping_address_display = None
 	if shopify_order.get("customer", {}):
 		if customer_id := shopify_order.get("customer", {}).get("id"):
-			customer = frappe.db.get_value("Customer", {CUSTOMER_ID_FIELD: customer_id}, "name")
+			if billing_address := platform_customer_address_doc(customer_id, address_type="Billing"):
+				billing_address_display = get_address_display(billing_address.as_dict())
+			if shipping_address := platform_customer_address_doc(customer_id, address_type="Shipping"):
+				shipping_address_display = get_address_display(shipping_address.as_dict())
 
 	so = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: shopify_order.get("id")}, "name")
 
@@ -117,6 +128,13 @@ def create_sales_order(shopify_order, setting, company=None):
 				"items": items,
 				"taxes": taxes,
 				"tax_category": get_dummy_tax_category(),
+				"shopify_customer_id": customer_id,
+				"customer_address" : billing_address,
+				"shopify_billing_address": billing_address,
+				"shopify_billing_address_display": billing_address_display,
+				"shipping_address_name": shipping_address,
+				"shopify_shipping_address": shipping_address,
+				"shopify_shipping_address_display": shipping_address_display
 			}
 		)
 

@@ -24,6 +24,13 @@ from ecommerce_integrations.shopify.constants import (
 	ORDER_NUMBER_FIELD,
 	ORDER_STATUS_FIELD,
 	SUPPLIER_ID_FIELD,
+	CUSTOMER_FULL_NAME_FIELD,
+	BILLING_ADDRESS_FIELD,
+	BILLING_ADDRESS_DISPLAY_FIELD,
+	SHIPPING_ADDRESS_FIELD,
+	SHIPPING_ADDRESS_DISPLAY_FIELD,
+	PHONE_NUMBER_FIELD,
+	EMAIL_FIELD,
 )
 from ecommerce_integrations.shopify.utils import (
 	ensure_old_connector_is_disabled,
@@ -171,6 +178,88 @@ def setup_custom_fields():
 				read_only=1,
 				print_hide=1,
 			),
+			dict(
+				fieldname="tb_shopify_details",
+				label="Shopify Details",
+				fieldtype="Tab Break",
+				insert_after="connections_tab",
+			),
+			dict(
+				fieldname="sb_shopify_customer_details",
+				label="Shopify Customer Details",
+				fieldtype="Section Break",
+				insert_after="tb_shopify_details",
+			),
+			dict(
+				fieldname=CUSTOMER_ID_FIELD,
+				label="Shopify Platform Customer",
+				fieldtype="Link",
+				options="Shopify Platform Customer",
+				insert_after="sb_shopify_customer_details",
+			),
+			dict(
+				fieldname=CUSTOMER_FULL_NAME_FIELD,
+				label="Shopify Customer Full Name",
+				fieldtype="Data",
+				insert_after=CUSTOMER_ID_FIELD,
+				fetch_from=f"{CUSTOMER_ID_FIELD}.full_name",
+			),
+			dict(
+				fieldname="cb_shopify_customer_details",
+				fieldtype="Column Break",
+				insert_after=CUSTOMER_FULL_NAME_FIELD,
+			),
+			dict(
+				fieldname=PHONE_NUMBER_FIELD,
+				label="Shopify Customer Phone Number",
+				fieldtype="Data",
+				insert_after="cb_shopify_customer_details",
+				fetch_from=f"{CUSTOMER_ID_FIELD}.phone",
+			),
+			dict(
+				fieldname=EMAIL_FIELD,
+				label="Shopify Customer Email",
+				fieldtype="Data",
+				insert_after=PHONE_NUMBER_FIELD,
+				fetch_from=f"{CUSTOMER_ID_FIELD}.email",
+			),
+			dict(
+				fieldname="sb_shopify_address",
+				label="Shopify Address Details",
+				fieldtype="Section Break",
+				insert_after=EMAIL_FIELD,
+			),
+			dict(
+				fieldname=BILLING_ADDRESS_FIELD,
+				label="Billing Address",
+				fieldtype="Link",
+				options="Address",
+				insert_after="sb_shopify_address",
+			),
+			dict(
+				fieldname=BILLING_ADDRESS_DISPLAY_FIELD,
+				label="Billing Address Display",
+				fieldtype="Small Text",
+				insert_after=BILLING_ADDRESS_FIELD,
+			),
+			dict(
+				fieldname="cb_shopify_address",
+				fieldtype="Column Break",
+				insert_after=BILLING_ADDRESS_DISPLAY_FIELD,
+			),
+			dict(
+				fieldname=SHIPPING_ADDRESS_FIELD,
+				label="Shipping Address",
+				fieldtype="Link",
+				options="Address",
+				insert_after="cb_shopify_address",
+			),
+			dict(
+				fieldname=SHIPPING_ADDRESS_DISPLAY_FIELD,
+				label="Shipping Address Display",
+				fieldtype="Small Text",
+				insert_after=SHIPPING_ADDRESS_FIELD,
+			)
 		],
 		"Sales Order Item": [
 			dict(
