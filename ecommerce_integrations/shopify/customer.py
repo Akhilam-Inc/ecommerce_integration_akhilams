@@ -136,10 +136,9 @@ def _map_address_fields(shopify_address, customer_id, address_type, email):
 def get_shopify_platform_customer_address_doc(shopify_platform: str, address_type: str):
 	try:
 		addresses = frappe.get_all(
-			"Address", {"link_name": shopify_platform, "address_type": address_type}
+			"Address", {"link_name": shopify_platform, "address_type": address_type}, pluck="name"
 		)
 		if addresses:
-			address = frappe.get_last_doc("Address", {"name": addresses[0].name})
-			return address
+			return frappe.get_last_doc("Address", {"name": addresses[0]})
 	except frappe.DoesNotExistError:
 		return None

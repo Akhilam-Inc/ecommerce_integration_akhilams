@@ -93,12 +93,12 @@ def create_sales_order(shopify_order, setting, company=None):
 
 	so = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: shopify_order.get("id")}, "name")
 	# Create customer fullname
-	if shopify_order.get("customer"):
-		first_name = shopify_order.get("customer").get("first_name", "")
-		last_name = shopify_order.get("customer").get("last_name", "")
-		shopify_customer_full_name = first_name + " " + last_name
-	else:
-		shopify_customer_full_name = ""
+	# if shopify_order.get("customer"):
+	# 	first_name = shopify_order.get("customer").get("first_name", "")
+	# 	last_name = shopify_order.get("customer").get("last_name", "")
+	# 	shopify_customer_full_name = first_name + " " + last_name
+	# else:
+	# 	shopify_customer_full_name = ""
 
 	# Create billing address with below sample data
 	# if shopify_order.get("billing_address"):
@@ -112,22 +112,22 @@ def create_sales_order(shopify_order, setting, company=None):
 	# 	shopify_billing_address = address_line_1 + ",\n" + address_line_2 + ",\n" + city + ",\n" + zip_code + ",\n" + province + ",\n" + country + ",\n" + phone
 	# else:
 	# 	shopify_billing_address = ""
-	if shopify_order.get("billing_address"):
-		billing_address = shopify_order.get("billing_address")
-		address_line_1 = str(billing_address.get("address1", "") or "")
-		address_line_2 = str(billing_address.get("address2", "") or "")
-		city = str(billing_address.get("city", "") or "")
-		zip_code = str(billing_address.get("zip", "") or "")
-		province = str(billing_address.get("province", "") or "")
-		country = str(billing_address.get("country", "") or "")
-		phone = str(billing_address.get("phone", "") or "")
+	# if shopify_order.get("billing_address"):
+	# 	billing_address = shopify_order.get("billing_address")
+	# 	address_line_1 = str(billing_address.get("address1", "") or "")
+	# 	address_line_2 = str(billing_address.get("address2", "") or "")
+	# 	city = str(billing_address.get("city", "") or "")
+	# 	zip_code = str(billing_address.get("zip", "") or "")
+	# 	province = str(billing_address.get("province", "") or "")
+	# 	country = str(billing_address.get("country", "") or "")
+	# 	phone = str(billing_address.get("phone", "") or "")
 
 		# Join non-empty parts with a newline
-		shopify_billing_address = ",\n".join(
-			filter(None, [address_line_1, address_line_2, city, zip_code, province, country, phone])
-		)
-	else:
-		shopify_billing_address = ""
+		# shopify_billing_address = ",\n".join(
+		# 	filter(None, [address_line_1, address_line_2, city, zip_code, province, country, phone])
+		# )
+	# else:
+	# 	shopify_billing_address = ""
 
 	# Create shipping address with below sample data
 	# if shopify_order.get("shipping_address"):
@@ -141,22 +141,22 @@ def create_sales_order(shopify_order, setting, company=None):
 	# 	shopify_shipping_address = address_line_1 + ",\n" + address_line_2 + ",\n" + city + ",\n" + zip_code + ",\n" + province + ",\n" + country + ",\n" + phone
 	# else:
 	# 	shopify_shipping_address = ""
-	if shopify_order.get("shipping_address"):
-		shipping_address = shopify_order.get("shipping_address")
-		address_line_1 = shipping_address.get("address1", "") or ""
-		address_line_2 = shipping_address.get("address2", "") or ""
-		city = shipping_address.get("city", "") or ""
-		zip_code = shipping_address.get("zip", "") or ""
-		province = shipping_address.get("province", "") or ""
-		country = shipping_address.get("country", "") or ""
-		phone = shipping_address.get("phone", "") or ""
+	# if shopify_order.get("shipping_address"):
+	# 	shipping_address = shopify_order.get("shipping_address")
+	# 	address_line_1 = shipping_address.get("address1", "") or ""
+	# 	address_line_2 = shipping_address.get("address2", "") or ""
+	# 	city = shipping_address.get("city", "") or ""
+	# 	zip_code = shipping_address.get("zip", "") or ""
+	# 	province = shipping_address.get("province", "") or ""
+	# 	country = shipping_address.get("country", "") or ""
+	# 	phone = shipping_address.get("phone", "") or ""
 
 		# Construct the shipping address string
-		address_parts = [address_line_1, address_line_2, city, zip_code, province, country, phone]
-		address_parts = [part for part in address_parts if part]  # Remove empty or None values
-		shopify_shipping_address = ",\n".join(address_parts)
-	else:
-		shopify_shipping_address = ""
+		# address_parts = [address_line_1, address_line_2, city, zip_code, province, country, phone]
+		# address_parts = [part for part in address_parts if part]  # Remove empty or None values
+		# shopify_shipping_address = ",\n".join(address_parts)
+	# else:
+	# 	shopify_shipping_address = ""
 
 	if not so:
 		items = get_order_items(
@@ -186,9 +186,9 @@ def create_sales_order(shopify_order, setting, company=None):
 				ORDER_ID_FIELD: str(shopify_order.get("id")),
 				ORDER_NUMBER_FIELD: shopify_order.get("name"),
 				"customer": customer,
-				"custom_shopify_customer_name": shopify_customer_full_name,
-				"custom_shopify_customer_billing_address": shopify_billing_address,
-				"custom_shopify_customer_shipping_address": shopify_shipping_address,
+				# "custom_shopify_customer_name": shopify_customer_full_name,
+				# "custom_shopify_customer_billing_address": billing_address_display,
+				# "custom_shopify_customer_shipping_address": shipping_address_display,
 				"transaction_date": getdate(shopify_order.get("created_at")) or nowdate(),
 				"delivery_date": getdate(shopify_order.get("created_at")) or nowdate(),
 				"company": setting.company,
@@ -198,11 +198,11 @@ def create_sales_order(shopify_order, setting, company=None):
 				"taxes": taxes,
 				"tax_category": get_dummy_tax_category(),
 				"shopify_customer_id": customer_id,
-				"customer_address": billing_address,
-				"shopify_billing_address": billing_address,
+				"customer_address": billing_address.name if billing_address else None,
+				"shopify_billing_address": billing_address.name if billing_address else None,
 				"shopify_billing_address_display": billing_address_display,
-				"shipping_address_name": shipping_address,
-				"shopify_shipping_address": shipping_address,
+				"shipping_address_name": shipping_address.name if shipping_address else None,
+				"shopify_shipping_address": shipping_address.name if shipping_address else None,
 				"shopify_shipping_address_display": shipping_address_display,
 			}
 		)
