@@ -193,7 +193,7 @@ def create_sales_order(shopify_order, setting, company=None):
 				"delivery_date": getdate(shopify_order.get("created_at")) or nowdate(),
 				"company": setting.company,
 				"selling_price_list": get_dummy_price_list(),
-				"ignore_pricing_rule": 1,
+				"ignore_pricing_rule": 0,
 				"items": items,
 				"taxes": taxes,
 				"tax_category": get_dummy_tax_category(),
