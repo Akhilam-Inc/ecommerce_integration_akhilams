@@ -177,7 +177,11 @@ def create_sales_order(shopify_order, setting, company=None):
 			create_shopify_log(status="Error", exception=message, rollback=True)
 
 			return ""
-
+		
+		selling_price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list")
+		if not selling_price_list:	
+			selling_price_list = get_dummy_price_list()
+			
 		taxes = get_order_taxes(shopify_order, setting, items)
 		so = frappe.get_doc(
 			{
@@ -192,7 +196,7 @@ def create_sales_order(shopify_order, setting, company=None):
 				"transaction_date": getdate(shopify_order.get("created_at")) or nowdate(),
 				"delivery_date": getdate(shopify_order.get("created_at")) or nowdate(),
 				"company": setting.company,
-				"selling_price_list": get_dummy_price_list(),
+				"selling_price_list": selling_price_list,
 				"ignore_pricing_rule": 1,
 				"items": items,
 				"taxes": taxes,
@@ -212,7 +216,7 @@ def create_sales_order(shopify_order, setting, company=None):
 		so.flags.ignore_mandatory = True
 		so.flags.shopiy_order_json = json.dumps(shopify_order)
 		so.save(ignore_permissions=True)
-		so.submit()
+		# so.submit()
 
 		if shopify_order.get("note"):
 			so.add_comment(text=f"Order Note: {shopify_order.get('note')}")
