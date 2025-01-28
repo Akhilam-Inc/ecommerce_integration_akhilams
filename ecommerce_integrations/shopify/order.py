@@ -181,7 +181,7 @@ def create_sales_order(shopify_order, setting, company=None):
 		selling_price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list")
 		if not selling_price_list:	
 			selling_price_list = get_dummy_price_list()
-			
+		
 		taxes = get_order_taxes(shopify_order, setting, items)
 		so = frappe.get_doc(
 			{
@@ -200,7 +200,7 @@ def create_sales_order(shopify_order, setting, company=None):
 				"ignore_pricing_rule": 0,
 				"items": items,
 				"taxes": taxes,
-				"tax_category": get_dummy_tax_category(),
+				"tax_category": None,
 				"shopify_customer_id": customer_id,
 				"customer_address": billing_address.name if billing_address else None,
 				"shopify_billing_address": billing_address.name if billing_address else None,
