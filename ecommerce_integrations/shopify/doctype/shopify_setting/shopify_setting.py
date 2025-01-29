@@ -334,6 +334,20 @@ def setup_custom_fields():
 				print_hide=1,
 			),
 		],
+		"Warehouse": [
+			dict(
+				fieldname = "shopify_settings",
+				label = "Shopify Settings",
+				fieldtype = "Section Break",
+				insert_after = "default_in_transit_warehouse",
+			),
+			dict(
+				fieldname="shopify_sync_order",
+				label="Shopify Sync Order",
+				fieldtype="Check",
+				insert_after="shopify_settings",
+			),
+		]
 	}
 
 	create_custom_fields(custom_fields)

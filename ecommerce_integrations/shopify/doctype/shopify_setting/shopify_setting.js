@@ -42,7 +42,7 @@ frappe.ui.form.on("Shopify Setting", {
 			return {
 				filters: {
 					company: frm.doc.company,
-					is_group: 0,
+					shopify_sync_order: 1,
 					disabled: 0,
 				},
 			};
@@ -53,7 +53,6 @@ frappe.ui.form.on("Shopify Setting", {
 			"shopify_warehouse_mapping",
 			warehouse_query
 		);
-
 		frm.set_query("price_list", () => {
 			return {
 				filters: {
@@ -76,7 +75,7 @@ frappe.ui.form.on("Shopify Setting", {
 				filters: [
 					["Account", "account_type", "in", ["Cash", "Bank"]],
 					["Account", "root_type", "=", "Asset"],
-					["Account", "is_group", "=", 0],
+						["Account", "is_group", "=", 0],
 					["Account", "company", "=", frm.doc.company],
 				],
 			};
