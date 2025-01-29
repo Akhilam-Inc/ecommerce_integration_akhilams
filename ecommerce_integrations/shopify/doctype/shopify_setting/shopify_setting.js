@@ -42,7 +42,7 @@ frappe.ui.form.on("Shopify Setting", {
 			return {
 				filters: {
 					company: frm.doc.company,
-					shopify_sync_order: 1,
+					sync_inventory_to_shopify: 1,
 					disabled: 0,
 				},
 			};
