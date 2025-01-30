@@ -105,10 +105,14 @@ class ShopifySetting(SettingController):
 		return [wh_map.erpnext_warehouse for wh_map in self.shopify_warehouse_mapping]
 
 	def get_erpnext_to_integration_wh_mapping(self) -> Dict[ERPNextWarehouse, IntegrationWarehouse]:
-		return {
-			wh_map.erpnext_warehouse: wh_map.shopify_location_id
-			for wh_map in self.shopify_warehouse_mapping
+		wh_map = {wh_map.erpnext_warehouse: wh_map.shopify_location_id for wh_map in self.shopify_warehouse_mapping}
+		child_warehouse_details = {warehouse: get_child_nodes("Warehouse", warehouse) for warehouse in wh_map.keys()}
+		child_wh_mapping = {
+			row: shopify_location_id
+			for erpnext_wh, shopify_location_id in wh_map.items()
+			for row in child_warehouse_details[erpnext_wh]
 		}
+		return child_wh_mapping
 
 	def get_integration_to_erpnext_wh_mapping(self) -> Dict[IntegrationWarehouse, ERPNextWarehouse]:
 		return {
@@ -116,6 +120,14 @@ class ShopifySetting(SettingController):
 			for wh_map in self.shopify_warehouse_mapping
 		}
 
+def get_child_nodes(group_type, root):
+	lft, rgt = frappe.db.get_value(group_type, root, ["lft", "rgt"])
+	return frappe.get_all(group_type,{
+		"is_group" : 0,
+		"sync_inventory_to_shopify" : 1,
+		"lft" : [">=", lft],
+		"rgt" : ["<=", rgt]
+	},pluck="name",order_by="lft")
 
 def setup_custom_fields():
 	custom_fields = {
@@ -342,8 +354,8 @@ def setup_custom_fields():
 				insert_after = "default_in_transit_warehouse",
 			),
 			dict(
-				fieldname="shopify_sync_order",
-				label="Shopify Sync Order",
+				fieldname="sync_inventory_to_shopify",
+				label="Sync Inventory to Shopify",
 				fieldtype="Check",
 				insert_after="shopify_settings",
 			),
