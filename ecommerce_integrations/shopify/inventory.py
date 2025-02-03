@@ -6,7 +6,7 @@ from pyactiveresource.connection import ResourceNotFound
 from shopify.resources import InventoryLevel, Variant
 
 from ecommerce_integrations.controllers.inventory import (
-	get_inventory_levels,
+	get_inventory_levels_of_group_warehouse,
 	update_inventory_sync_status,
 )
 from ecommerce_integrations.controllers.scheduling import need_to_run
@@ -28,11 +28,12 @@ def update_inventory_on_shopify() -> None:
 	if not need_to_run(SETTING_DOCTYPE, "inventory_sync_frequency", "last_inventory_sync"):
 		return
 
-	warehous_map = setting.get_erpnext_to_integration_wh_mapping()
-	inventory_levels = get_inventory_levels(tuple(warehous_map.keys()), MODULE_NAME)
+	if warehous_map := setting.get_erpnext_to_integration_wh_mapping():
+		for warehouse in warehous_map.keys():
+			inventory_levels = get_inventory_levels_of_group_warehouse(warehouse, MODULE_NAME)
 
-	if inventory_levels:
-		upload_inventory_data_to_shopify(inventory_levels, warehous_map)
+			if inventory_levels:
+				upload_inventory_data_to_shopify(inventory_levels, warehous_map)
 
 
 @temp_shopify_session
