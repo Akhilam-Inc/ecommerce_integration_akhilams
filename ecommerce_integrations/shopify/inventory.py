@@ -66,7 +66,7 @@ def upload_inventory_data_to_shopify(inventory_levels, warehous_map) -> None:
 			except Exception as e:
 				d.status = "Failed"
 				d.failure_reason = str(e)
-				frappe.log_error(title=f"Shopify Inventory Sync Failed - {d.ecom_item}", message=str(e))
+				# frappe.log_error(title=f"Shopify Inventory Sync Failed - {d.ecom_item}", message=str(e))
 
 			frappe.db.commit()
 
