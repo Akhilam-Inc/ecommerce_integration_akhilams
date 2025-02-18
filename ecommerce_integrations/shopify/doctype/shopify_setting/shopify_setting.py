@@ -53,8 +53,8 @@ class ShopifySetting(SettingController):
 		self._validate_warehouse_links()
 		self._initalize_default_values()
 
-		if self.is_enabled():
-			setup_custom_fields()
+		# if self.is_enabled():
+		# 	setup_custom_fields()
 
 	def on_update(self):
 		if self.is_enabled() and not self.is_old_data_migrated:
@@ -334,6 +334,7 @@ def setup_custom_fields():
 				print_hide=1,
 			),
 		],
+		
 	}
 
 	create_custom_fields(custom_fields)
