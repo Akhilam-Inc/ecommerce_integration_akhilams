@@ -18,7 +18,8 @@ def prepare_sales_invoice(payload, request_id=None):
 	frappe.set_user("Administrator")
 	setting = frappe.get_doc(SETTING_DOCTYPE)
 	frappe.flags.request_id = request_id
-
+	if not cint(setting.sync_sales_invoice):
+		return
 	try:
 		sales_order = get_sales_order(cstr(order["id"]))
 		if sales_order:

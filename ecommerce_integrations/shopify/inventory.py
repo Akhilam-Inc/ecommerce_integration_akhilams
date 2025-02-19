@@ -6,7 +6,7 @@ from pyactiveresource.connection import ResourceNotFound
 from shopify.resources import InventoryLevel, Variant
 
 from ecommerce_integrations.controllers.inventory import (
-	get_inventory_levels,
+	get_inventory_levels_of_group_warehouse,
 	update_inventory_sync_status,
 )
 from ecommerce_integrations.controllers.scheduling import need_to_run
@@ -28,11 +28,12 @@ def update_inventory_on_shopify() -> None:
 	if not need_to_run(SETTING_DOCTYPE, "inventory_sync_frequency", "last_inventory_sync"):
 		return
 
-	warehous_map = setting.get_erpnext_to_integration_wh_mapping()
-	inventory_levels = get_inventory_levels(tuple(warehous_map.keys()), MODULE_NAME)
+	if warehous_map := setting.get_erpnext_to_integration_wh_mapping():
+		for warehouse in warehous_map.keys():
+			inventory_levels = get_inventory_levels_of_group_warehouse(warehouse, MODULE_NAME)
 
-	if inventory_levels:
-		upload_inventory_data_to_shopify(inventory_levels, warehous_map)
+			if inventory_levels:
+				upload_inventory_data_to_shopify(inventory_levels, warehous_map)
 
 
 @temp_shopify_session
@@ -51,7 +52,10 @@ def upload_inventory_data_to_shopify(inventory_levels, warehous_map) -> None:
 					location_id=d.shopify_location_id,
 					inventory_item_id=inventory_id,
 					# shopify doesn't support fractional quantity
-					available=cint(d.actual_qty) - cint(d.reserved_qty),
+
+					# Show total qty available in the warehouse
+					available=cint(d.actual_qty)
+					# available=cint(d.actual_qty) - cint(d.reserved_qty),
 				)
 				update_inventory_sync_status(d.ecom_item, time=synced_on)
 				d.status = "Success"
@@ -62,6 +66,7 @@ def upload_inventory_data_to_shopify(inventory_levels, warehous_map) -> None:
 			except Exception as e:
 				d.status = "Failed"
 				d.failure_reason = str(e)
+				# frappe.log_error(title=f"Shopify Inventory Sync Failed - {d.ecom_item}", message=str(e))
 
 			frappe.db.commit()
 

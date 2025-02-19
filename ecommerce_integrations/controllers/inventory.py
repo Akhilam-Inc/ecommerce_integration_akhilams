@@ -55,11 +55,10 @@ def get_inventory_levels_of_group_warehouse(warehouse: str, integration: str):
 				JOIN tabBin bin
 				ON ei.erpnext_item_code = bin.item_code
 			WHERE bin.warehouse in ({', '.join(['%s'] * len(all_warehouses))})
-				AND integration = %s
+				AND integration = %s 
 			GROUP BY
 				ei.erpnext_item_code
-			HAVING
-				last_updated > last_synced
+			ORDER BY last_synced ASC
 			""",
 		values=all_warehouses + (integration,),
 		as_dict=1,

@@ -104,10 +104,9 @@ class ShopifySetting(SettingController):
 	def get_erpnext_warehouses(self) -> List[ERPNextWarehouse]:
 		return [wh_map.erpnext_warehouse for wh_map in self.shopify_warehouse_mapping]
 
-	def get_erpnext_to_integration_wh_mapping(self) -> Dict[ERPNextWarehouse, IntegrationWarehouse]:
+	def get_erpnext_to_integration_wh_mapping(self) -> dict[ERPNextWarehouse, IntegrationWarehouse]:
 		return {
-			wh_map.erpnext_warehouse: wh_map.shopify_location_id
-			for wh_map in self.shopify_warehouse_mapping
+			wh_map.erpnext_warehouse: wh_map.shopify_location_id for wh_map in self.shopify_warehouse_mapping
 		}
 
 	def get_integration_to_erpnext_wh_mapping(self) -> Dict[IntegrationWarehouse, ERPNextWarehouse]:
@@ -115,7 +114,6 @@ class ShopifySetting(SettingController):
 			wh_map.shopify_location_id: wh_map.erpnext_warehouse
 			for wh_map in self.shopify_warehouse_mapping
 		}
-
 
 def setup_custom_fields():
 	custom_fields = {
@@ -333,8 +331,7 @@ def setup_custom_fields():
 				read_only=1,
 				print_hide=1,
 			),
-		],
-		
+		]
 	}
 
 	create_custom_fields(custom_fields)
