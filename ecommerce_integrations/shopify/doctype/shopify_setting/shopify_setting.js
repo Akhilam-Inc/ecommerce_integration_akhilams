@@ -26,9 +26,58 @@ frappe.ui.form.on("Shopify Setting", {
 	},
 
 	refresh: function (frm) {
+		frm.add_custom_button(__("Update Shipping Details"), function () {
+            frappe.prompt([
+                {
+                    label: 'Order ID',
+                    fieldname: 'order_id',
+                    fieldtype: 'Data',
+                    reqd: 1
+                },
+                {
+                    label: 'Tracking Number',
+                    fieldname: 'tracking_number',
+                    fieldtype: 'Data',
+                    reqd: 1
+                }
+            ], function(values){
+                frappe.call({
+                    method: "ecommerce_integrations.api.update_shipping_details",
+                    args: {
+                        order_id: values.order_id,
+                        tracking_string: values.tracking_number
+                    },
+					freeze: true,
+                    callback: function(r) {
+                        try {
+                            if (!r.exc) {
+                                const msg = `Order ${values.order_id} with tracking number ${values.tracking_number} Shipping details updated successfully`;
+                                frappe.show_alert({
+                                    message: __(msg),
+                                    indicator: 'green'
+                                }, 5);
+                            }
+                        } catch (e) {
+                            console.error("Error updating shipping details:", e);
+                            frappe.show_alert({
+                                message: __("Failed to update shipping details"),
+                                indicator: 'red'
+                            }, 5);
+                        }
+                    },
+                    error: function(r) {
+                        frappe.show_alert({
+                            message: __("Failed to update shipping details"),
+                            indicator: 'red'
+                        }, 5);
+                    }
+                });
+            }, __('Update Shipping Details'), __('Update'));
+        });
 		frm.add_custom_button(__("Import Products"), function () {
 			frappe.set_route("shopify-import-products");
 		});
+		
 		frm.add_custom_button(__("View Logs"), () => {
 			frappe.set_route("List", "Ecommerce Integration Log", {
 				integration: "Shopify",
