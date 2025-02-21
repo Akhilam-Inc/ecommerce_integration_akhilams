@@ -1,23 +1,37 @@
-import requests 
-import json 
+import requests
+import json
 import frappe
 import time
 from datetime import datetime
+import backoff
 
-class RateLimiter:
-    def __init__(self, calls_per_second=2):
-        self.calls_per_second = calls_per_second
-        self.last_call_time = None
-    
-    def wait_if_needed(self):
-        current_time = datetime.now()
-        if self.last_call_time:
-            elapsed = (current_time - self.last_call_time).total_seconds()
-            if elapsed < (1.0 / self.calls_per_second):
-                time.sleep((1.0 / self.calls_per_second) - elapsed)
-        self.last_call_time = current_time
+class ShopifyRateLimit:
+    def __init__(self, max_retries=5):
+        self.max_retries = max_retries
 
-rate_limiter = RateLimiter()
+    def on_backoff(details):
+        frappe.logger().info(f"Backing off {details['wait']:0.1f} seconds after {details['tries']} tries")
+
+    @backoff.on_exception(
+        backoff.expo,
+        requests.exceptions.RequestException,
+        max_tries=10,
+        on_backoff=on_backoff
+    )
+    def call_shopify_api(self, session, url, method='get', data=None, headers=None):
+        if method.lower() == 'get':
+            response = session.get(url, headers=headers)
+        else:
+            response = session.post(url, json=data, headers=headers)
+            
+        if 'exceeded' in response.text.lower():
+            raise requests.exceptions.RequestException("Rate limit exceeded")
+            frappe.log_error(title="Shopify Fulfillment", message=f"Response: {response.text}")
+
+            
+        return response
+
+shopify_api = ShopifyRateLimit()
 
 def call_shopify_api(session, url, method='get', data=None, headers=None):
     rate_limiter.wait_if_needed()
@@ -42,20 +56,82 @@ def parse_tracking_info(tracking_string):
 def get_shopify_settings():
     settings = frappe.get_doc("Shopify Setting")
     if not settings.enable_shopify:
+        frappe.log_error(title="Shopify Integration", message="Shopify integration is disabled")
         frappe.throw("Shopify integration is disabled")
     if not settings.password or not settings.shopify_url:
+        frappe.log_error(title="Shopify Integration", message="Missing Shopify credentials. Please set Access Token and Store URL in Shopify Settings")
         frappe.throw("Missing Shopify credentials. Please set Access Token and Store URL in Shopify Settings")
     return settings
 
 def get_shopify_order(session, store_url, order_id, headers):
     order_url = f"https://{store_url}/admin/api/2025-01/orders/{order_id}.json"
-    # response = call_shopify_api(session, order_url, headers=headers)
-    response = call_shopify_api(session=session, url=order_url,method='get',headers=headers)
+    response = shopify_api.call_shopify_api(session=session, url=order_url, method='get', headers=headers)
     
     if response.status_code != 200:
+        frappe.log_error(title="Shopify Order not Found", message=response.text)
         frappe.throw(f"Order {order_id} not found in Shopify: {response.text}")
     
     return response.json()
+
+def create_fulfillment(session, store_url, order_id, headers):
+    # Get fulfillment orders
+    fulfillment_order_url = f"https://{store_url}/admin/api/2024-10/orders/{order_id}/fulfillment_orders.json"
+    response = shopify_api.call_shopify_api(session=session, url=fulfillment_order_url, method='get', headers=headers)
+    frappe.log_error(title="Shopify Fulfillment", message=f"Response: {response.text}")
+
+    if response.status_code != 200:
+        frappe.log_error(title="Shopify Fulfillment", message=f"Failed to get fulfillment order ID: {response.text}")
+        frappe.throw(f"Failed to get fulfillment order ID: {response.text}")
+    
+    fulfillment_orders = response.json().get('fulfillment_orders', [])
+    if not fulfillment_orders:
+        frappe.throw(f"No fulfillment orders found for order {response.json()}")
+    
+    fulfillment_order_id = fulfillment_orders[0]['id']
+    
+    # Create fulfillment using GraphQL
+    graphql_url = f"https://{store_url}/admin/api/2025-01/graphql.json"
+    graphql_query = {
+        "query": """
+            mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) {
+                fulfillmentCreateV2(fulfillment: $fulfillment) {
+                    fulfillment {
+                        id
+                        status
+                    }
+                    userErrors {
+                        field
+                        message
+                    }
+                }
+            }
+        """,
+        "variables": {
+            "fulfillment": {
+                "lineItemsByFulfillmentOrder": {
+                    "fulfillmentOrderId": f"gid://shopify/FulfillmentOrder/{fulfillment_order_id}"
+                }
+            }
+        }
+    }
+    
+    response = shopify_api.call_shopify_api(session=session, url=graphql_url, method='post', data=graphql_query, headers=headers)
+    response_data = response.json()
+    frappe.log_error(title="Shopify Fulfillment", message=f"Response: {response_data}")
+    
+    if response.status_code != 200 or 'errors' in response_data:
+        frappe.throw(f"Failed to create fulfillment: {response.text}")
+        frappe.log_error(title="Shopify Fulfillment", message=f"Response: {response_data}")
+
+    
+    fulfillment_data = response_data['data']['fulfillmentCreateV2']['fulfillment']
+    if not fulfillment_data:
+        error_message = response_data['data']['fulfillmentCreateV2']['userErrors'][0]['message']
+        frappe.throw(f"Failed to create fulfillment: {error_message}")
+        frappe.log_error(title="Shopify Fulfillment", message=f"Response: {error_message}")
+
+    return fulfillment_data['id'].split('/')[-1]
+
 
 @frappe.whitelist()
 def update_shipping_details(order_id, tracking_string):
@@ -71,43 +147,16 @@ def update_shipping_details(order_id, tracking_string):
     store_url = settings.shopify_url
     
     try:
+        # Get order details
         order_data = get_shopify_order(session, store_url, order_id, headers)
         
+        # Get or create fulfillment
         if not order_data['order']['fulfillments']:
-            fulfillment_order_url = f"https://{store_url}/admin/api/2025-01/orders/{order_id}/fulfillment_orders.json"
-            # response = call_shopify_api(session, fulfillment_order_url, headers=headers)
-            response = call_shopify_api(session=session, url=fulfillment_order_url,method='get',headers=headers)
-            
-            if response.status_code != 200:
-                frappe.throw(f"Failed to get fulfillment order ID: {response.text}")
-            
-            fulfillment_order_id = response.json()['fulfillment_orders'][0]['id']
-            
-            graphql_url = f"https://{store_url}/admin/api/2025-01/graphql.json"
-            graphql_query = {
-                "query": "mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) { fulfillmentCreateV2(fulfillment: $fulfillment) { fulfillment { id status } userErrors { field message } } }",
-                "variables": {
-                    "fulfillment": {
-                        "lineItemsByFulfillmentOrder": {
-                            "fulfillmentOrderId": f"gid://shopify/FulfillmentOrder/{fulfillment_order_id}"
-                        }
-                    }
-                }
-            }
-            response = call_shopify_api(session=session, url=graphql_url,method='post',data=graphql_query,headers=headers)
-            # response = call_shopify_api(session, graphql_url, method='post', data=graphql_query, headers=headers)
-            response_data = response.json()
-            
-            if response.status_code != 200 or 'errors' in response_data:
-                frappe.throw(f"Failed to request fulfillment: {response.text}")
-            
-            if response_data['data']['fulfillmentCreateV2']['fulfillment']:
-                fulfillment_id = response_data['data']['fulfillmentCreateV2']['fulfillment']['id'].split('/')[-1]
-            else:
-                frappe.throw(f"Failed to request fulfillment: {response_data['data']['fulfillmentCreateV2']['userErrors'][0]['message']}")
+            fulfillment_id = create_fulfillment(session, store_url, order_id, headers)
         else:
             fulfillment_id = order_data['order']['fulfillments'][0]['id']
         
+        # Update tracking information
         tracking_info = {
             "fulfillment": {
                 "tracking_info": {
@@ -119,12 +168,22 @@ def update_shipping_details(order_id, tracking_string):
         }
         
         update_tracking_url = f"https://{store_url}/admin/api/2025-01/fulfillments/{fulfillment_id}/update_tracking.json"
-        response = call_shopify_api(session=session, url=update_tracking_url, method='post', data=tracking_info, headers=headers)
+        response = shopify_api.call_shopify_api(
+            session=session,
+            url=update_tracking_url,
+            method='post',
+            data=tracking_info,
+            headers=headers
+        )
         
         if response.status_code == 200:
             return f"Order {order_id} marked as fulfilled in Shopify with tracking: {tracking_number} ({carrier})"
+            frappe.log_error(title="Shopify Fulfillment", message=f"Response: {response.text}")
+
         
         frappe.throw(f"Failed to update Shopify: {response.text}")
+        frappe.log_error(title="Shopify Fulfillment", message=f"Response: {response.text}")
+
         
     finally:
         session.close()
