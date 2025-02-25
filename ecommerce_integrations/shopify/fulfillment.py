@@ -21,6 +21,9 @@ def prepare_delivery_note(payload, request_id=None):
 
 	order = payload
 
+	if not cint(setting.sync_delivery_note):
+		return
+
 	try:
 		sales_order = get_sales_order(cstr(order["id"]))
 		if sales_order:
