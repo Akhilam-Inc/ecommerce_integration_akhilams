@@ -21,5 +21,27 @@ frappe.ui.form.on("Sales Invoice", {
 				__("Unicommerce")
 			);
 		}
+
+		if (frm.doc.shopify_order_id) {
+			frm.add_custom_button(
+				__("Update Shopify Fulfillment"),
+				function () {
+					frappe.call({
+						method: "ecommerce_integrations.api.update_shipping_details",
+						args: {
+							order_id: frm.doc.shopify_order_id,
+							tracking_string: frm.doc.tracking_string
+						},
+						callback: function (r) {
+							if (!r.exc) {
+								frappe.msgprint(__("Shopify Fulfillment Created Successfully"));
+								frm.reload_doc();
+							}
+						}
+					});
+				},
+				__("Shopify")
+			);
+		}
 	},
 });
