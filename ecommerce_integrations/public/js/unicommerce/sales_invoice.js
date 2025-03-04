@@ -30,7 +30,7 @@ frappe.ui.form.on("Sales Invoice", {
 						method: "ecommerce_integrations.api.update_shipping_details",
 						args: {
 							order_id: frm.doc.shopify_order_id,
-							tracking_string: frm.doc.tracking_string
+							tracking_string: frm.doc.custom_eshipz_tracking_number
 						},
 						callback: function (r) {
 							if (!r.exc) {
