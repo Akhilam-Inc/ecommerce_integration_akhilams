@@ -294,8 +294,7 @@ def get_order_taxes(shopify_order, setting, items):
 		for tax in line_item.get("tax_lines"):
 			taxes.append(
 				{
-					# "charge_type": "Actual",
-					"charge_type": "On Net Total",
+					"charge_type": "Actual",
 					"account_head": get_tax_account_head(tax, charge_type="sales_tax"),
 					"description": (
 						get_tax_account_description(tax) or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
