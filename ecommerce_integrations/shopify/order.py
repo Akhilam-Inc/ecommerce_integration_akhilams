@@ -429,7 +429,7 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 					}
 					if shipping_as_item
 					else {},
-					"dont_recompute_tax": 1,
+					"dont_recompute_tax": 0,
 				}
 			)
 
