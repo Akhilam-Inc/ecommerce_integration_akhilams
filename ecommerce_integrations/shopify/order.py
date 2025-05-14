@@ -292,10 +292,15 @@ def get_order_taxes(shopify_order, setting, items):
 	for line_item in line_items:
 		item_code = get_item_code(line_item)
 		for tax in line_item.get("tax_lines"):
+			row_id=None
+			account_head, charge_type = get_tax_account_head(tax, charge_type="sales_tax")
+			if charge_type in ["On Previous Row Amount","On Previous Row Total"]:
+				row_id = 1
 			taxes.append(
 				{
-					"charge_type": "Actual",
-					"account_head": get_tax_account_head(tax, charge_type="sales_tax"),
+					"charge_type": charge_type,
+					"account_head": account_head,
+					"row_id": row_id,
 					"description": (
 						get_tax_account_description(tax) or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
 					),
@@ -353,9 +358,15 @@ def consolidate_order_taxes(taxes):
 def get_tax_account_head(tax, charge_type: Optional[Literal["shipping", "sales_tax"]] = None):
 	tax_title = str(tax.get("title"))
 
-	tax_account = frappe.db.get_value(
-		"Shopify Tax Account", {"parent": SETTING_DOCTYPE, "shopify_tax": tax_title}, "tax_account",
+	tax_account_data = frappe.db.get_value(
+		"Shopify Tax Account",
+		{"parent": SETTING_DOCTYPE, "shopify_tax": tax_title},
+		["tax_account", "charge_type"],
+		as_dict=True,
 	)
+
+	tax_account = tax_account_data.tax_account if tax_account_data else None
+	chargeable_type = tax_account_data.charge_type if tax_account_data else "Actual"
 
 	if not tax_account and charge_type:
 		tax_account = frappe.db.get_single_value(SETTING_DOCTYPE, DEFAULT_TAX_FIELDS[charge_type])
@@ -363,7 +374,7 @@ def get_tax_account_head(tax, charge_type: Optional[Literal["shipping", "sales_t
 	if not tax_account:
 		frappe.throw(_("Tax Account not specified for Shopify Tax {0}").format(tax.get("title")))
 
-	return tax_account
+	return tax_account, chargeable_type
 
 
 def get_tax_account_description(tax):
@@ -404,21 +415,32 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 					}
 				)
 			else:
+				row_id=None
+				account_head, charge_type = get_tax_account_head(shipping_charge, charge_type="shipping")
+				if charge_type in ["On Previous Row Amount","On Previous Row Total"]:
+					row_id = 1
 				taxes.append(
 					{
-						"charge_type": "Actual",
-						"account_head": get_tax_account_head(shipping_charge, charge_type="shipping"),
+						"charge_type": charge_type,
+						"account_head": account_head,
+						"row_id" : row_id,
 						"description": get_tax_account_description(shipping_charge) or shipping_charge["title"],
 						"tax_amount": shipping_charge_amount,
 						"cost_center": setting.cost_center,
+						"dont_recompute_tax": 1,
 					}
 				)
 
 		for tax in shipping_charge.get("tax_lines"):
+			row_id=None
+			account_head, charge_type = get_tax_account_head(tax, charge_type="sales_tax")
+			if charge_type in ["On Previous Row Amount","On Previous Row Total"]:
+				row_id = 1
 			taxes.append(
 				{
-					"charge_type": "Actual",
-					"account_head": get_tax_account_head(tax, charge_type="sales_tax"),
+					"charge_type": charge_type,
+					"account_head": account_head,
+					"row_id" : row_id,
 					"description": (
 						get_tax_account_description(tax) or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
 					),
@@ -429,7 +451,7 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 					}
 					if shipping_as_item
 					else {},
-					"dont_recompute_tax": 0,
+					"dont_recompute_tax": 1,
 				}
 			)
 
