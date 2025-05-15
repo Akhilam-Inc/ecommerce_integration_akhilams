@@ -6,6 +6,7 @@
  "field_order": [
   "shopify_tax",
   "charge_type",
+  "order_sequence",
   "column_break_2",
   "tax_account",
   "tax_description"
@@ -43,11 +44,18 @@
    "label": "Type",
    "options": "\nActual\nOn Net Total\nOn Previous Row Amount\nOn Previous Row Total\nOn Item Quantity",
    "reqd": 1
+  },
+  {
+   "fieldname": "order_sequence",
+   "fieldtype": "Int",
+   "label": "Order Sequence",
+   "non_negative": 1,
+   "reqd": 1
   }
  ],
  "istable": 1,
  "links": [],
- "modified": "2025-05-14 18:53:24.419503",
+ "modified": "2025-05-15 18:37:25.954915",
  "modified_by": "Administrator",
  "module": "shopify",
  "name": "Shopify Tax Account",

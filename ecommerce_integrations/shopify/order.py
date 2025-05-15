@@ -286,59 +286,65 @@ def _get_total_discount(line_item) -> float:
 
 
 def get_order_taxes(shopify_order, setting, items):
-	taxes = []
-	line_items = shopify_order.get("line_items")
+	unsorted_taxes = []
+	line_items = shopify_order.get("line_items", [])
 
 	for line_item in line_items:
 		item_code = get_item_code(line_item)
-		for tax in line_item.get("tax_lines"):
-			row_id=None
-			account_head, charge_type = get_tax_account_head(tax, charge_type="sales_tax")
-			if charge_type in ["On Previous Row Amount","On Previous Row Total"]:
-				row_id = 1
-			taxes.append(
-				{
-					"charge_type": charge_type,
-					"account_head": account_head,
-					"row_id": row_id,
-					"description": (
-						get_tax_account_description(tax) or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
-					),
-					"tax_amount": tax.get("price"),
-					"included_in_print_rate": 0,
-					"cost_center": setting.cost_center,
-					"item_wise_tax_detail": {item_code: [flt(tax.get("rate")) * 100, flt(tax.get("price"))]},
-					"dont_recompute_tax": 1,
-				}
-			)
+		for tax in line_item.get("tax_lines", []):
+			account_head, charge_type, order_sequence = get_tax_account_head(tax, charge_type="sales_tax")
+
+			tax_rate = flt(tax.get("rate")) * 100
+			tax_amount = flt(tax.get("price"))
+
+			unsorted_taxes.append({
+				"charge_type": charge_type,
+				"account_head": account_head,
+				"order_sequence": order_sequence,
+				"description": get_tax_account_description(tax) or f"{tax.get('title')} - {tax_rate:.2f}%",
+				"tax_amount": tax_amount,
+				"included_in_print_rate": 0,
+				"cost_center": setting.cost_center,
+				"item_wise_tax_detail": {item_code: [tax_rate, tax_amount]},
+				"dont_recompute_tax": 1,
+			})
 
 	update_taxes_with_shipping_lines(
-		taxes,
-		shopify_order.get("shipping_lines"),
+		unsorted_taxes,
+		shopify_order.get("shipping_lines", []),
 		setting,
 		items,
 		taxes_inclusive=shopify_order.get("taxes_included"),
 	)
 
 	if cint(setting.consolidate_taxes):
-		taxes = consolidate_order_taxes(taxes)
+		unsorted_taxes = consolidate_order_taxes(unsorted_taxes)
 
-	for row in taxes:
-		tax_detail = row.get("item_wise_tax_detail")
-		if isinstance(tax_detail, dict):
-			row["item_wise_tax_detail"] = json.dumps(tax_detail)
+	sorted_taxes = sorted(unsorted_taxes, key=lambda x: x.get("order_sequence") or 0)
 
-	return taxes
+	last_independent_row_idx = None
+
+	for idx, row in enumerate(sorted_taxes):
+		if row["charge_type"] in ["On Previous Row Amount", "On Previous Row Total"]:
+			row["row_id"] = last_independent_row_idx + 1 if last_independent_row_idx is not None else 1
+		else:
+			last_independent_row_idx = idx
+
+		if isinstance(row.get("item_wise_tax_detail"), dict):
+			row["item_wise_tax_detail"] = json.dumps(row["item_wise_tax_detail"])
+
+	return sorted_taxes
 
 
 def consolidate_order_taxes(taxes):
 	tax_account_wise_data = {}
 	for tax in taxes:
 		account_head = tax["account_head"]
+		charge_type = tax["charge_type"]
 		tax_account_wise_data.setdefault(
 			account_head,
 			{
-				"charge_type": "Actual",
+				"charge_type": charge_type,
 				"account_head": account_head,
 				"description": tax.get("description"),
 				"cost_center": tax.get("cost_center"),
@@ -361,12 +367,13 @@ def get_tax_account_head(tax, charge_type: Optional[Literal["shipping", "sales_t
 	tax_account_data = frappe.db.get_value(
 		"Shopify Tax Account",
 		{"parent": SETTING_DOCTYPE, "shopify_tax": tax_title},
-		["tax_account", "charge_type"],
+		["tax_account", "charge_type","order_sequence"],
 		as_dict=True,
 	)
 
 	tax_account = tax_account_data.tax_account if tax_account_data else None
 	chargeable_type = tax_account_data.charge_type if tax_account_data else "Actual"
+	order_sequence = tax_account_data.order_sequence if tax_account_data else 0
 
 	if not tax_account and charge_type:
 		tax_account = frappe.db.get_single_value(SETTING_DOCTYPE, DEFAULT_TAX_FIELDS[charge_type])
@@ -374,7 +381,7 @@ def get_tax_account_head(tax, charge_type: Optional[Literal["shipping", "sales_t
 	if not tax_account:
 		frappe.throw(_("Tax Account not specified for Shopify Tax {0}").format(tax.get("title")))
 
-	return tax_account, chargeable_type
+	return tax_account, chargeable_type, order_sequence
 
 
 def get_tax_account_description(tax):
@@ -415,15 +422,12 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 					}
 				)
 			else:
-				row_id=None
-				account_head, charge_type = get_tax_account_head(shipping_charge, charge_type="shipping")
-				if charge_type in ["On Previous Row Amount","On Previous Row Total"]:
-					row_id = 1
+				account_head, charge_type, order_sequence = get_tax_account_head(shipping_charge, charge_type="shipping")
 				taxes.append(
 					{
 						"charge_type": charge_type,
 						"account_head": account_head,
-						"row_id" : row_id,
+						"order_sequence": order_sequence,
 						"description": get_tax_account_description(shipping_charge) or shipping_charge["title"],
 						"tax_amount": shipping_charge_amount,
 						"cost_center": setting.cost_center,
@@ -432,15 +436,12 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 				)
 
 		for tax in shipping_charge.get("tax_lines"):
-			row_id=None
-			account_head, charge_type = get_tax_account_head(tax, charge_type="sales_tax")
-			if charge_type in ["On Previous Row Amount","On Previous Row Total"]:
-				row_id = 1
+			account_head, charge_type, order_sequence = get_tax_account_head(tax, charge_type="sales_tax")
 			taxes.append(
 				{
 					"charge_type": charge_type,
 					"account_head": account_head,
-					"row_id" : row_id,
+					"order_sequence": order_sequence,
 					"description": (
 						get_tax_account_description(tax) or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
 					),
