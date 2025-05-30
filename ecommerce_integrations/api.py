@@ -73,7 +73,16 @@ def get_shopify_order(session, store_url, order_id, headers):
     
     return response.json()
 
-def create_fulfillment(session, store_url, order_id, headers):
+settings = get_shopify_settings()
+session = requests.Session()
+headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "X-Shopify-Access-Token": settings.get_password('password')
+}
+store_url = settings.shopify_url
+
+def create_fulfillment(session=session, store_url=store_url, order_id=None, headers=headers):
     # Get fulfillment orders
     fulfillment_order_url = f"https://{store_url}/admin/api/2024-10/orders/{order_id}/fulfillment_orders.json"
     response = shopify_api.call_shopify_api(session=session, url=fulfillment_order_url, method='get', headers=headers)

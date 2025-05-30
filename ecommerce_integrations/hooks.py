@@ -142,6 +142,7 @@ scheduler_events = {
 	],
 	"hourly": [
 		"ecommerce_integrations.shopify.order.sync_old_orders",
+        "ecommerce_integrations.ecommerce_integrations.scheduler.schedule_shipping_updates",
 		"ecommerce_integrations.amazon.doctype.amazon_sp_api_settings.amazon_sp_api_settings.schedule_get_order_details",
 	],
 	"hourly_long": [
