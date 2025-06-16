@@ -14,6 +14,10 @@ class EcommerceCustomer:
 		"""Check if customer on Ecommerce site is synced with ERPNext"""
 
 		return bool(frappe.db.exists("Shopify Platform Customer", {"customer_id": self.customer_id}))
+	
+	def get_default_customer(self):
+		shopify_settings = frappe.get_single("Shopify Setting")
+		return shopify_settings.default_customer
 
 	def get_customer_doc(self):
 		"""Get ERPNext customer document."""

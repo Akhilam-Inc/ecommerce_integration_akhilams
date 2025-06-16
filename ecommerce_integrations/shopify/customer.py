@@ -83,8 +83,22 @@ class ShopifyCustomer(EcommerceCustomer):
 			new_values = _map_address_fields(shopify_address, customer_id, address_type, email)
 
 			old_address.update({k: v for k, v in new_values.items() if k not in exclude_in_update})
+			
+			self.update_default_customer_address(old_address)
+
 			old_address.flags.ignore_mandatory = True
 			old_address.save()
+
+	def update_default_customer_address(self, old_address):
+		default_customer = self.get_default_customer()
+		if default_customer and not self.check_default_customer_in_links(old_address, default_customer):
+			old_address.append("links", {"link_doctype": "Customer", "link_name": default_customer})
+
+	def check_default_customer_in_links(self, old_address, default_customer):
+		for link in old_address.links:
+			if link.link_doctype == "Customer" and link.link_name == default_customer:
+				return True
+		return False
 
 	def create_customer_contact(self, shopify_customer: Dict[str, Any]) -> None:
 
