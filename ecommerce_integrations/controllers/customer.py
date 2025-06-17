@@ -60,12 +60,17 @@ class EcommerceCustomer:
 		"""Create address from dictionary containing fields used in Address doctype of ERPNext."""
 
 		customer_doc = self.get_customer_doc()
+		default_customer = self.get_default_customer()
+
+		links = [{"link_doctype": "Shopify Platform Customer", "link_name": customer_doc.name}]
+		if default_customer:
+			links.append({"link_doctype": "Customer", "link_name": default_customer})
 
 		frappe.get_doc(
 			{
 				"doctype": "Address",
 				**address,
-				"links": [{"link_doctype": "Shopify Platform Customer", "link_name": customer_doc.name}],
+				"links": links,
 			}
 		).insert(ignore_mandatory=True)
 
