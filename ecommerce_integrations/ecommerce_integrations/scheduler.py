@@ -2,7 +2,7 @@ import frappe
 import requests
 import json
 from datetime import datetime
-from ecommerce_integrations.ecommerce_integrations.api import update_shipping_details, create_fulfillment
+from ecommerce_integrations.api import update_shipping_details, create_fulfillment
 
 @frappe.whitelist()
 def schedule_shipping_updates():
