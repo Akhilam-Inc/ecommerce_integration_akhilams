@@ -215,6 +215,7 @@ def create_sales_order(shopify_order, setting, company=None):
 			so.update({"company": company, "status": "Draft"})
 		so.flags.ignore_mandatory = True
 		so.flags.shopiy_order_json = json.dumps(shopify_order)
+		so.run_method("calculate_taxes_and_totals")
 		so.save(ignore_permissions=True)
 		# so.submit()
 
@@ -301,6 +302,7 @@ def get_order_taxes(shopify_order, setting, items):
 				"charge_type": charge_type,
 				"account_head": account_head,
 				"order_sequence": order_sequence,
+				"rate":tax_rate,
 				"description": get_tax_account_description(tax) or f"{tax.get('title')} - {tax_rate:.2f}%",
 				"tax_amount": tax_amount,
 				"included_in_print_rate": 0,
@@ -309,17 +311,39 @@ def get_order_taxes(shopify_order, setting, items):
 				"dont_recompute_tax": 1,
 			})
 
-	update_taxes_with_shipping_lines(
-		unsorted_taxes,
-		shopify_order.get("shipping_lines", []),
-		setting,
-		items,
-		taxes_inclusive=shopify_order.get("taxes_included"),
-	)
+	if shopify_order.get("shipping_lines", []):
+		update_taxes_with_shipping_lines(
+			unsorted_taxes,
+			shopify_order.get("shipping_lines", []),
+			setting,
+			items,
+			taxes_inclusive=shopify_order.get("taxes_included"),
+		)
+	else:
+		shipping_charge = {"title": "Standard Shipping"}
+		shipping_charge_amount = flt(getattr(setting, "default_shipping_amount", 0.0))
+
+		account_head, charge_type, order_sequence = get_tax_account_head(
+			shipping_charge, charge_type="shipping"
+		)
+
+		unsorted_taxes.append(
+			{
+				"charge_type": charge_type,
+				"account_head": account_head,
+				"order_sequence": order_sequence,
+				"rate":tax_rate,
+				"description": get_tax_account_description(shipping_charge) or shipping_charge["title"],
+				"tax_amount": shipping_charge_amount,
+				"cost_center": setting.cost_center,
+				"dont_recompute_tax": 1,
+			}
+		)
 
 	if cint(setting.consolidate_taxes):
 		unsorted_taxes = consolidate_order_taxes(unsorted_taxes)
 
+	unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
 	sorted_taxes = sorted(unsorted_taxes, key=lambda x: x.get("order_sequence") or 0)
 
 	last_independent_row_idx = None
@@ -333,7 +357,63 @@ def get_order_taxes(shopify_order, setting, items):
 		if isinstance(row.get("item_wise_tax_detail"), dict):
 			row["item_wise_tax_detail"] = json.dumps(row["item_wise_tax_detail"])
 
+	print(sorted_taxes)
 	return sorted_taxes
+
+def consolidate_taxes_by_account_head(taxes):
+	"""
+	Consolidate taxes by account_head, combining item_wise_tax_detail
+	and setting tax_amount to 0.0
+	"""
+	consolidated = {}
+	
+	for tax in taxes:
+		account_head = tax.get("account_head")
+		charge_type = tax.get("charge_type")
+		
+		# Create a unique key for consolidation
+		key = (account_head, charge_type)
+		
+		if key not in consolidated:
+			# Create new consolidated entry
+			consolidated[key] = {
+				"charge_type": charge_type,
+				"account_head": account_head,
+				"order_sequence": tax.get("order_sequence"),
+				"description": tax.get("description", ""),
+				"included_in_print_rate": tax.get("included_in_print_rate", 0),
+				"cost_center": tax.get("cost_center"),
+				"item_wise_tax_detail": {},
+				"dont_recompute_tax": tax.get("dont_recompute_tax", 1),
+			}
+		else:
+			# Update to keep the max order_sequence
+			existing_seq = consolidated[key].get("order_sequence", 0)
+			new_seq = tax.get("order_sequence", 0)
+			consolidated[key]["order_sequence"] = max(existing_seq, new_seq)
+		
+		# Merge item_wise_tax_detail
+		current_item_detail = tax.get("item_wise_tax_detail", {})
+		if isinstance(current_item_detail, str):
+			current_item_detail = json.loads(current_item_detail)
+		
+		for item_code, (tax_rate, tax_amount) in current_item_detail.items():
+			consolidated[key]["item_wise_tax_detail"][item_code] = [tax_rate, 0.0]  # Keep rate, set amount to 0.0
+	
+	# Handle shipping charges separately - add all item codes with 0.0 rates and amounts
+	for key, tax_entry in consolidated.items():
+		if tax_entry["charge_type"] == "Actual" and "Shipping" in tax_entry["account_head"]:
+			# Add all item codes from the items list with 0.0 rate and amount
+			all_item_codes = set()
+			for other_key, other_tax in consolidated.items():
+				if other_key != key:
+					all_item_codes.update(other_tax["item_wise_tax_detail"].keys())
+			
+			for item_code in all_item_codes:
+				tax_entry["item_wise_tax_detail"][item_code] = [0.0, 0.0]
+	
+	return list(consolidated.values())
+
 
 
 def consolidate_order_taxes(taxes):
