@@ -287,78 +287,81 @@ def _get_total_discount(line_item) -> float:
 
 
 def get_order_taxes(shopify_order, setting, items):
-	unsorted_taxes = []
-	line_items = shopify_order.get("line_items", [])
+	try:
+		unsorted_taxes = []
+		line_items = shopify_order.get("line_items", [])
 
-	for line_item in line_items:
-		item_code = get_item_code(line_item)
-		for tax in line_item.get("tax_lines", []):
-			account_head, charge_type, order_sequence = get_tax_account_head(tax, charge_type="sales_tax")
+		for line_item in line_items:
+			item_code = get_item_code(line_item)
+			for tax in line_item.get("tax_lines", []):
+				account_head, charge_type, order_sequence = get_tax_account_head(tax, charge_type="sales_tax")
 
-			tax_rate = flt(tax.get("rate")) * 100
-			tax_amount = flt(tax.get("price"))
+				tax_rate = flt(tax.get("rate")) * 100
+				tax_amount = flt(tax.get("price"))
 
-			unsorted_taxes.append({
-				"charge_type": charge_type,
-				"account_head": account_head,
-				"order_sequence": order_sequence,
-				"rate":tax_rate,
-				"description": get_tax_account_description(tax) or f"{tax.get('title')} - {tax_rate:.2f}%",
-				"tax_amount": tax_amount,
-				"included_in_print_rate": 0,
-				"cost_center": setting.cost_center,
-				"item_wise_tax_detail": {item_code: [tax_rate, tax_amount]},
-				"dont_recompute_tax": 1,
-			})
+				unsorted_taxes.append({
+					"charge_type": charge_type,
+					"account_head": account_head,
+					"order_sequence": order_sequence,
+					"rate":tax_rate,
+					"description": get_tax_account_description(tax) or f"{tax.get('title')} - {tax_rate:.2f}%",
+					"tax_amount": tax_amount,
+					"included_in_print_rate": 0,
+					"cost_center": setting.cost_center,
+					"item_wise_tax_detail": {item_code: [tax_rate, tax_amount]},
+					"dont_recompute_tax": 1,
+				})
 
-	if shopify_order.get("shipping_lines", []):
-		update_taxes_with_shipping_lines(
-			unsorted_taxes,
-			shopify_order.get("shipping_lines", []),
-			setting,
-			items,
-			taxes_inclusive=shopify_order.get("taxes_included"),
-		)
-	else:
-		shipping_charge = {"title": "Standard Shipping"}
-		shipping_charge_amount = flt(getattr(setting, "default_shipping_amount", 0.0))
-
-		account_head, charge_type, order_sequence = get_tax_account_head(
-			shipping_charge, charge_type="shipping"
-		)
-
-		unsorted_taxes.append(
-			{
-				"charge_type": charge_type,
-				"account_head": account_head,
-				"order_sequence": order_sequence,
-				"rate":tax_rate,
-				"description": get_tax_account_description(shipping_charge) or shipping_charge["title"],
-				"tax_amount": shipping_charge_amount,
-				"cost_center": setting.cost_center,
-				"dont_recompute_tax": 1,
-			}
-		)
-
-	if cint(setting.consolidate_taxes):
-		unsorted_taxes = consolidate_order_taxes(unsorted_taxes)
-
-	unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
-	sorted_taxes = sorted(unsorted_taxes, key=lambda x: x.get("order_sequence") or 0)
-
-	last_independent_row_idx = None
-
-	for idx, row in enumerate(sorted_taxes):
-		if row["charge_type"] in ["On Previous Row Amount", "On Previous Row Total"]:
-			row["row_id"] = last_independent_row_idx + 1 if last_independent_row_idx is not None else 1
+		if shopify_order.get("shipping_lines", []):
+			update_taxes_with_shipping_lines(
+				unsorted_taxes,
+				shopify_order.get("shipping_lines", []),
+				setting,
+				items,
+				taxes_inclusive=shopify_order.get("taxes_included"),
+			)
 		else:
-			last_independent_row_idx = idx
+			shipping_charge = {"title": "Standard Shipping"}
+			shipping_charge_amount = flt(getattr(setting, "default_shipping_amount", 0.0))
 
-		if isinstance(row.get("item_wise_tax_detail"), dict):
-			row["item_wise_tax_detail"] = json.dumps(row["item_wise_tax_detail"])
+			account_head, charge_type, order_sequence = get_tax_account_head(
+				shipping_charge, charge_type="shipping"
+			)
 
-	print(sorted_taxes)
-	return sorted_taxes
+			unsorted_taxes.append(
+				{
+					"charge_type": charge_type,
+					"account_head": account_head,
+					"order_sequence": order_sequence,
+					"rate":tax_rate,
+					"description": get_tax_account_description(shipping_charge) or shipping_charge["title"],
+					"tax_amount": shipping_charge_amount,
+					"cost_center": setting.cost_center,
+					"dont_recompute_tax": 1,
+				}
+			)
+
+		if cint(setting.consolidate_taxes):
+			unsorted_taxes = consolidate_order_taxes(unsorted_taxes)
+
+		unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
+		sorted_taxes = sorted(unsorted_taxes, key=lambda x: x.get("order_sequence") or 0)
+
+		last_independent_row_idx = None
+
+		for idx, row in enumerate(sorted_taxes):
+			if row["charge_type"] in ["On Previous Row Amount", "On Previous Row Total"]:
+				row["row_id"] = last_independent_row_idx + 1 if last_independent_row_idx is not None else 1
+			else:
+				last_independent_row_idx = idx
+
+			if isinstance(row.get("item_wise_tax_detail"), dict):
+				row["item_wise_tax_detail"] = json.dumps(row["item_wise_tax_detail"])
+
+		print(sorted_taxes)
+		return sorted_taxes
+	except Exception as e:
+		frappe.log_error(message=frappe.get_traceback(),title="Shopify Order Tax Sync Failed")
 
 def consolidate_taxes_by_account_head(taxes):
 	"""
@@ -630,3 +633,543 @@ def _fetch_old_orders(from_time, to_time):
 			# Using generator instead of fetching all at once is better for
 			# avoiding rate limits and reducing resource usage.
 			yield order.to_dict()
+
+
+order = """
+{
+    "admin_graphql_api_id": "gid://shopify/Order/6714908148022",
+    "app_id": 1354745,
+    "billing_address": {
+        "address1": "ABK Imports Pvt. Ltd. East Mundhwa",
+        "address2": "Verdant 84, 4th Floor, North Main Road, Koregaon Park, East, Mundhwa",
+        "city": "Pune",
+        "company": "ABK Imports Pvt Ltd.",
+        "country": "India",
+        "country_code": "IN",
+        "first_name": "test",
+        "last_name": "order",
+        "latitude": 18.5334461,
+        "longitude": 73.9163488,
+        "name": "test order",
+        "phone": "+918530655573",
+        "province": "Maharashtra",
+        "province_code": "MH",
+        "zip": "411036"
+    },
+    "browser_ip": "106.210.165.133",
+    "buyer_accepts_marketing": true,
+    "cancel_reason": null,
+    "cancelled_at": null,
+    "cart_token": null,
+    "checkout_id": 39999679988022,
+    "checkout_token": "ad564a89d550e5ef6729b85ff1c0cfa7",
+    "client_details": {
+        "accept_language": null,
+        "browser_height": null,
+        "browser_ip": "106.210.165.133",
+        "browser_width": null,
+        "session_hash": null,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    },
+    "closed_at": null,
+    "confirmation_number": "YCDF1XE8E",
+    "confirmed": true,
+    "contact_email": "yash.gawai@abkimports.com",
+    "created_at": "2025-07-14T18:11:39+05:30",
+    "currency": "INR",
+    "current_shipping_price_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "current_subtotal_price": "6004.00",
+    "current_subtotal_price_set": {
+        "presentment_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        }
+    },
+    "current_total_additional_fees_set": null,
+    "current_total_discounts": "0.00",
+    "current_total_discounts_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "current_total_duties_set": null,
+    "current_total_price": "6004.00",
+    "current_total_price_set": {
+        "presentment_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        }
+    },
+    "current_total_tax": "876.52",
+    "current_total_tax_set": {
+        "presentment_money": {
+            "amount": "876.52",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "876.52",
+            "currency_code": "INR"
+        }
+    },
+    "customer": {
+        "admin_graphql_api_id": "gid://shopify/Customer/7755951440182",
+        "created_at": "2024-02-09T13:34:55+05:30",
+        "currency": "INR",
+        "default_address": {
+            "address1": "ABK Imports Pvt. Ltd. East Mundhwa",
+            "address2": "Verdant 84, 4th Floor, North Main Road, Koregaon Park, East, Mundhwa",
+            "city": "Pune",
+            "company": "ABK Imports Pvt Ltd.",
+            "country": "India",
+            "country_code": "IN",
+            "country_name": "India",
+            "customer_id": 7755951440182,
+            "default": true,
+            "first_name": "test",
+            "id": 11199806112054,
+            "last_name": "order",
+            "name": "test order",
+            "phone": "+918530655573",
+            "province": "Maharashtra",
+            "province_code": "MH",
+            "zip": "411036"
+        },
+        "email": "yash.gawai@abkimports.com",
+        "email_marketing_consent": {
+            "consent_updated_at": "2024-02-09T13:34:58+05:30",
+            "opt_in_level": "single_opt_in",
+            "state": "subscribed"
+        },
+        "first_name": "Yash",
+        "id": 7755951440182,
+        "last_name": "Gawai",
+        "multipass_identifier": null,
+        "note": null,
+        "phone": "+918530655573",
+        "sms_marketing_consent": {
+            "consent_collected_from": "SHOPIFY",
+            "consent_updated_at": "2024-03-05T16:42:19+05:30",
+            "opt_in_level": "single_opt_in",
+            "state": "subscribed"
+        },
+        "state": "enabled",
+        "tags": "newsletter, Nitro-FP, prospect, subscribed_MM, Warranty Registration Entry, Wrote Judge.me web review",
+        "tax_exempt": false,
+        "tax_exemptions": [],
+        "updated_at": "2025-07-14T18:11:39+05:30",
+        "verified_email": true
+    },
+    "customer_locale": "en-IN",
+    "device_id": null,
+    "discount_applications": [],
+    "discount_codes": [],
+    "duties_included": false,
+    "email": "yash.gawai@abkimports.com",
+    "estimated_taxes": false,
+    "financial_status": "pending",
+    "fulfillment_status": null,
+    "fulfillments": [],
+    "id": 6714908148022,
+    "landing_site": null,
+    "landing_site_ref": null,
+    "line_items": [
+        {
+            "admin_graphql_api_id": "gid://shopify/LineItem/16711974846774",
+            "attributed_staffs": [],
+            "current_quantity": 1,
+            "discount_allocations": [],
+            "duties": [],
+            "fulfillable_quantity": 1,
+            "fulfillment_service": "manual",
+            "fulfillment_status": null,
+            "gift_card": false,
+            "grams": 0,
+            "id": 16711974846774,
+            "name": "Forcans Long Coat Aloe Dog Shampoo, 10 litre",
+            "price": "5629.00",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "5629.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "5629.00",
+                    "currency_code": "INR"
+                }
+            },
+            "product_exists": true,
+            "product_id": 7475617136790,
+            "properties": [],
+            "quantity": 1,
+            "requires_shipping": true,
+            "sku": "SHA820",
+            "tax_lines": [
+                {
+                    "channel_liable": false,
+                    "price": "429.33",
+                    "price_set": {
+                        "presentment_money": {
+                            "amount": "429.33",
+                            "currency_code": "INR"
+                        },
+                        "shop_money": {
+                            "amount": "429.33",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "rate": 0.09,
+                    "title": "CGST"
+                },
+                {
+                    "channel_liable": false,
+                    "price": "429.33",
+                    "price_set": {
+                        "presentment_money": {
+                            "amount": "429.33",
+                            "currency_code": "INR"
+                        },
+                        "shop_money": {
+                            "amount": "429.33",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "rate": 0.09,
+                    "title": "SGST"
+                }
+            ],
+            "taxable": true,
+            "title": "Forcans Long Coat Aloe Dog Shampoo, 10 litre",
+            "total_discount": "0.00",
+            "total_discount_set": {
+                "presentment_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                }
+            },
+            "variant_id": 41806214398102,
+            "variant_inventory_management": "shopify",
+            "variant_title": null,
+            "vendor": "FORCANS"
+        },
+        {
+            "admin_graphql_api_id": "gid://shopify/LineItem/16711974879542",
+            "attributed_staffs": [],
+            "current_quantity": 1,
+            "discount_allocations": [],
+            "duties": [],
+            "fulfillable_quantity": 1,
+            "fulfillment_service": "manual",
+            "fulfillment_status": null,
+            "gift_card": false,
+            "grams": 0,
+            "id": 16711974879542,
+            "name": "Aeolus One Super Dry Absorption Towels (Green)",
+            "price": "375.00",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "375.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "375.00",
+                    "currency_code": "INR"
+                }
+            },
+            "product_exists": true,
+            "product_id": 10075641545014,
+            "properties": [],
+            "quantity": 1,
+            "requires_shipping": true,
+            "sku": "DT65GN",
+            "tax_lines": [
+                {
+                    "channel_liable": false,
+                    "price": "8.93",
+                    "price_set": {
+                        "presentment_money": {
+                            "amount": "8.93",
+                            "currency_code": "INR"
+                        },
+                        "shop_money": {
+                            "amount": "8.93",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "rate": 0.025,
+                    "title": "CGST"
+                },
+                {
+                    "channel_liable": false,
+                    "price": "8.93",
+                    "price_set": {
+                        "presentment_money": {
+                            "amount": "8.93",
+                            "currency_code": "INR"
+                        },
+                        "shop_money": {
+                            "amount": "8.93",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "rate": 0.025,
+                    "title": "SGST"
+                }
+            ],
+            "taxable": true,
+            "title": "Aeolus One Super Dry Absorption Towels (Green)",
+            "total_discount": "0.00",
+            "total_discount_set": {
+                "presentment_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                }
+            },
+            "variant_id": 51539579568438,
+            "variant_inventory_management": "shopify",
+            "variant_title": null,
+            "vendor": "AEOLUS"
+        }
+    ],
+    "location_id": null,
+    "merchant_business_entity_id": "MTE3MDg0MDQx",
+    "merchant_of_record_app_id": null,
+    "name": "7666",
+    "note": null,
+    "note_attributes": [],
+    "number": 6666,
+    "order_number": 7666,
+    "order_status_url": "https://www.abkgrooming.com/17084041/orders/8fc599fca4d3ca81fe54f2b3aa5a0d70/authenticate?key=256a0207ef3ea81067e810cd1945a09f",
+    "original_total_additional_fees_set": null,
+    "original_total_duties_set": null,
+    "payment_gateway_names": [],
+    "payment_terms": {
+        "created_at": "2025-07-14T18:11:39+05:30",
+        "due_in_days": null,
+        "id": 32495730998,
+        "payment_schedules": [],
+        "payment_terms_name": "Due on receipt",
+        "payment_terms_type": "receipt",
+        "updated_at": "2025-07-14T18:11:39+05:30"
+    },
+    "phone": "+918530655573",
+    "po_number": null,
+    "presentment_currency": "INR",
+    "processed_at": "2025-07-14T18:11:38+05:30",
+    "reference": null,
+    "referring_site": null,
+    "refunds": [],
+    "returns": [],
+    "shipping_address": {
+        "address1": "ABK Imports Pvt. Ltd. East Mundhwa",
+        "address2": "Verdant 84, 4th Floor, North Main Road, Koregaon Park, East, Mundhwa",
+        "city": "Pune",
+        "company": "ABK Imports Pvt Ltd.",
+        "country": "India",
+        "country_code": "IN",
+        "first_name": "test",
+        "last_name": "order",
+        "latitude": 18.5334461,
+        "longitude": 73.9163488,
+        "name": "test order",
+        "phone": "+918530655573",
+        "province": "Maharashtra",
+        "province_code": "MH",
+        "zip": "411036"
+    },
+    "shipping_lines": [],
+    "source_identifier": null,
+    "source_name": "shopify_draft_order",
+    "source_url": null,
+    "subtotal_price": "6004.00",
+    "subtotal_price_set": {
+        "presentment_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        }
+    },
+    "tags": "",
+    "tax_exempt": false,
+    "tax_lines": [
+        {
+            "channel_liable": false,
+            "price": "429.33",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "429.33",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "429.33",
+                    "currency_code": "INR"
+                }
+            },
+            "rate": 0.09,
+            "title": "CGST"
+        },
+        {
+            "channel_liable": false,
+            "price": "8.93",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "8.93",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "8.93",
+                    "currency_code": "INR"
+                }
+            },
+            "rate": 0.025,
+            "title": "CGST"
+        },
+        {
+            "channel_liable": false,
+            "price": "429.33",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "429.33",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "429.33",
+                    "currency_code": "INR"
+                }
+            },
+            "rate": 0.09,
+            "title": "SGST"
+        },
+        {
+            "channel_liable": false,
+            "price": "8.93",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "8.93",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "8.93",
+                    "currency_code": "INR"
+                }
+            },
+            "rate": 0.025,
+            "title": "SGST"
+        }
+    ],
+    "taxes_included": true,
+    "test": false,
+    "token": "8fc599fca4d3ca81fe54f2b3aa5a0d70",
+    "total_cash_rounding_payment_adjustment_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_cash_rounding_refund_adjustment_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_discounts": "0.00",
+    "total_discounts_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_line_items_price": "6004.00",
+    "total_line_items_price_set": {
+        "presentment_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_outstanding": "6004.00",
+    "total_price": "6004.00",
+    "total_price_set": {
+        "presentment_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "6004.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_shipping_price_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_tax": "876.52",
+    "total_tax_set": {
+        "presentment_money": {
+            "amount": "876.52",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "876.52",
+            "currency_code": "INR"
+        }
+    },
+    "total_tip_received": "0.00",
+    "total_weight": 0,
+    "updated_at": "2025-07-14T18:13:31+05:30",
+    "user_id": 108132663606
+}
+"""
