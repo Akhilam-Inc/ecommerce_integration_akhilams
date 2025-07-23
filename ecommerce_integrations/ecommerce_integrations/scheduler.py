@@ -16,7 +16,7 @@ def schedule_shipping_updates():
             "Sales Invoice",
             filters={
             "custom_eshipz_tracking_number": ["not in", ["", "Shipment Not Created"]],
-            "custom_tracking_id": ["!=", ""],
+            "custom_tracking_id": ["=", ""],
             "shopify_order_id": ["!=", ""],
             "docstatus": 1,  # Only consider submitted invoices
             },
