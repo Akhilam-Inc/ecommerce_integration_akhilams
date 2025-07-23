@@ -186,13 +186,30 @@ def update_shipping_details(order_id, tracking_string):
         )
         
         if response.status_code == 200:
-            return f"Order {order_id} marked as fulfilled in Shopify with tracking: {tracking_number} ({carrier})"
-            frappe.log_error(title="Shopify Fulfillment", message=f"Response: {response.text}")
-
-        
-        frappe.throw(f"Failed to update Shopify: {response.text}")
-        frappe.log_error(title="Shopify Fulfillment", message=f"Response: {response.text}")
+            fulfillment_status = get_fulfillment_status(response.text)
+            if fulfillment_status:
+                # frappe.log_error(title="Shopify Fulfillment", message=f"Response: {response.text}, fulfillment_status: {fulfillment_status}")
+                return fulfillment_status
+        else:
+            frappe.throw(f"Failed to update Shopify: {response.text}")
+            frappe.log_error(title="Shopify Fulfillment Response Error", message=f"Response: {response.text},'fulfillment_id': {fulfillment_id}")
 
         
     finally:
         session.close()
+
+def get_fulfillment_status(response_text):
+    try:
+        data = json.loads(response_text)
+        line_items = data.get("fulfillment", {}).get("line_items", [])
+
+        for item in line_items:
+            status = item.get("fulfillment_status")
+            if status:  # non-null, non-empty
+                return status
+
+    except Exception as e:
+        frappe.log_error(f"Error extracting fulfillment_status: {str(e)}")
+
+    return None  # fallback if not found or error
+
