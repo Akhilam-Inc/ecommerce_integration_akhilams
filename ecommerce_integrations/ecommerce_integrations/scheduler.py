@@ -15,10 +15,10 @@ def schedule_shipping_updates():
         invoices = frappe.get_all(
             "Sales Invoice",
             filters={
-                "custom_eshipz_tracking_number": ["!=", ""],
-                "custom_tracking_id": ["!=", "fulfilled"],
-                "shopify_order_id": ["!=", ""],
-                "docstatus": 1,  # Only consider submitted invoices
+            "custom_eshipz_tracking_number": ["not in", ["", "Shipment Not Created"]],
+            "custom_tracking_id": ["not in", ["fulfilled", "By Hand Over"]],
+            "shopify_order_id": ["!=", ""],
+            "docstatus": 1,  # Only consider submitted invoices
             },
             fields=["name", "shopify_order_id", "custom_eshipz_tracking_number"]
         )
