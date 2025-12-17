@@ -262,55 +262,37 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 
 	return items
 
-
-# def _get_item_price(line_item, taxes_inclusive: bool) -> float:
-
-# 	price = flt(line_item.get("price"))
-# 	qty = cint(line_item.get("quantity"))
-
-# 	# remove line item level discounts
-# 	total_discount = _get_total_discount(line_item)
-
-# 	if not taxes_inclusive:
-# 		return price - (total_discount / qty)
-
-# 	total_taxes = 0.0
-# 	for tax in line_item.get("tax_lines"):
-# 		total_taxes += flt(tax.get("price"))
-
-# 	return price - (total_taxes + total_discount) / qty
-
 def _get_item_price(line_item, taxes_inclusive: bool) -> float:
 	price = flt(line_item.get("price"))
-	qty = cint(line_item.get("quantity"))
+	qty = cint(line_item.get("quantity")) or 1
 
-	# remove line item level discounts
+	# line-level discount
 	total_discount = _get_total_discount(line_item)
 
 	if not taxes_inclusive:
 		return price - (total_discount / qty)
 
-	total_taxes = 0.0
-	for tax in line_item.get("tax_lines"):
-		total_taxes += flt(tax.get("price"))
+	total_taxes = sum(flt(tax.get("price")) for tax in (line_item.get("tax_lines") or []))
 
 	calculated_rate = price - (total_taxes + total_discount) / qty
-	
-	# If rate is negative, calculate using tax rates
+
+	# Fallback if discount > price (edge case)
 	if calculated_rate < 0:
-		price = flt(line_item.get("price"))
 		sku = line_item.get("sku")
-		print(price,sku)
-
-		tax_template = frappe.db.get_value("Item Tax",{"parent":sku},"item_tax_template")
+		tax_template = frappe.db.get_value(
+			"Item Tax", {"parent": sku}, "item_tax_template"
+		)
 		if tax_template:
-			tax_rate = frappe.db.get_value("Item Tax Template",{"name":tax_template,"disabled":0},"gst_rate")
+			tax_rate = frappe.db.get_value(
+				"Item Tax Template",
+				{"name": tax_template, "disabled": 0},
+				"gst_rate",
+			)
 			if tax_rate:
-				gst_rate  = ((price * (tax_rate / 100)) / (100 + tax_rate)) * 100
-				calculated_rate = price - gst_rate
-	
-	return calculated_rate
+				gst_component = (price * tax_rate) / (100 + tax_rate)
+				calculated_rate = price - gst_component
 
+	return calculated_rate
 
 
 def _get_total_discount(line_item) -> float:
@@ -318,152 +300,139 @@ def _get_total_discount(line_item) -> float:
 	return sum(flt(discount.get("amount")) for discount in discount_allocations)
 
 
+# -------------------------------------------------------
+# ORDER TAXES
+# -------------------------------------------------------
+
 def get_order_taxes(shopify_order, setting, items):
 	try:
 		unsorted_taxes = []
 		line_items = shopify_order.get("line_items", [])
+		taxes_inclusive = cint(shopify_order.get("taxes_included"))
 
+		# -------------------------------
+		# Line Item Taxes
+		# -------------------------------
 		for line_item in line_items:
-			item_code = get_item_code(line_item)
 			for tax in line_item.get("tax_lines", []):
-				account_head, charge_type, order_sequence = get_tax_account_head(tax, charge_type="sales_tax")
+				account_head, charge_type, order_sequence = get_tax_account_head(
+					tax, charge_type="sales_tax"
+				)
 
 				tax_rate = flt(tax.get("rate")) * 100
-				tax_amount = flt(tax.get("price"))
 
 				unsorted_taxes.append({
 					"charge_type": charge_type,
 					"account_head": account_head,
 					"order_sequence": order_sequence,
-					"rate":tax_rate,
-					"description": get_tax_account_description(tax) or f"{tax.get('title')} - {tax_rate:.2f}%",
-					"tax_amount": tax_amount,
-					"included_in_print_rate": 0,
+					"rate": tax_rate,
+					"description": get_tax_account_description(tax)
+						or f"{tax.get('title')} - {tax_rate:.2f}%",
+					"included_in_print_rate": taxes_inclusive,
 					"cost_center": setting.cost_center,
-					"item_wise_tax_detail": {item_code: [tax_rate, tax_amount]},
-					"dont_recompute_tax": 1,
+					"dont_recompute_tax": 0,
 				})
 
+		# -------------------------------
+		# Shipping
+		# -------------------------------
 		if shopify_order.get("shipping_lines"):
 			update_taxes_with_shipping_lines(
 				unsorted_taxes,
 				shopify_order.get("shipping_lines", []),
 				setting,
 				items,
-				taxes_inclusive=shopify_order.get("taxes_included"),
+				taxes_inclusive=taxes_inclusive,
 			)
 		else:
+			# fallback shipping row
 			shipping_charge = {"title": "Standard Shipping"}
-			shipping_charge_amount = flt(getattr(setting, "default_shipping_amount", 0.0))
-
 			account_head, charge_type, order_sequence = get_tax_account_head(
 				shipping_charge, charge_type="shipping"
 			)
 
-			unsorted_taxes.append(
-				{
-					"charge_type": charge_type,
-					"account_head": account_head,
-					"order_sequence": order_sequence,
-					"rate":tax_rate,
-					"description": get_tax_account_description(shipping_charge) or shipping_charge["title"],
-					"tax_amount": shipping_charge_amount,
-					"cost_center": setting.cost_center,
-					"dont_recompute_tax": 1,
-				}
-			)
+			unsorted_taxes.append({
+				"charge_type": charge_type,
+				"account_head": account_head,
+				"order_sequence": order_sequence,
+				"rate": 0,
+				"description": get_tax_account_description(shipping_charge)
+					or shipping_charge["title"],
+				"cost_center": setting.cost_center,
+				"dont_recompute_tax": 0,
+			})
 
+		# -------------------------------
+		# Consolidation
+		# -------------------------------
 		if cint(setting.consolidate_taxes):
-			unsorted_taxes = consolidate_order_taxes(unsorted_taxes)
+			unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
 
-		print(unsorted_taxes)
-		unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
-		sorted_taxes = sorted(unsorted_taxes, key=lambda x: x.get("order_sequence") or 0)
+		sorted_taxes = sorted(
+			unsorted_taxes, key=lambda x: x.get("order_sequence") or 0
+		)
 
 		last_independent_row_idx = None
-
 		for idx, row in enumerate(sorted_taxes):
-			if row["charge_type"] in ["On Previous Row Amount", "On Previous Row Total"]:
-				row["row_id"] = last_independent_row_idx + 1 if last_independent_row_idx is not None else 1
+			if row["charge_type"] in ("On Previous Row Amount", "On Previous Row Total"):
+				row["row_id"] = (
+					last_independent_row_idx + 1
+					if last_independent_row_idx is not None
+					else 1
+				)
 			else:
 				last_independent_row_idx = idx
 
-			if isinstance(row.get("item_wise_tax_detail"), dict):
-				row["item_wise_tax_detail"] = json.dumps(row["item_wise_tax_detail"])
-
-		print(sorted_taxes)
 		return sorted_taxes
-	except Exception as e:
-		frappe.log_error(message=frappe.get_traceback(),title="Shopify Order Tax Sync Failed")
+
+	except Exception:
+		frappe.log_error(
+			message=frappe.get_traceback(),
+			title="Shopify Order Tax Sync Failed",
+		)
+		return []
+
+
+# -------------------------------------------------------
+# CONSOLIDATION (NO HARDCODED GST)
+# -------------------------------------------------------
 
 def consolidate_taxes_by_account_head(taxes):
 	tax_account_wise_data = {}
+
 	for tax in taxes:
 		account_head = tax["account_head"]
-		charge_type = tax["charge_type"]
 
-		# Determine tax rate based on account head
-		tax_rate = 18.0 if "IGST" in account_head else 9.0 if "CGST" in account_head or "SGST" in account_head else 0.0
-
-		# Initialize dictionary for this account head if not already present
 		tax_account_wise_data.setdefault(
 			account_head,
 			{
-				"charge_type": charge_type,
+				"charge_type": tax["charge_type"],
 				"account_head": account_head,
 				"description": tax.get("description"),
 				"cost_center": tax.get("cost_center"),
 				"order_sequence": tax.get("order_sequence"),
-				"included_in_print_rate": 0,
-				"dont_recompute_tax": 1,
-				"tax_amount": 0,
-				"rate": tax_rate,
-				"item_wise_tax_detail": {},
+				"included_in_print_rate": tax.get("included_in_print_rate", 0),
+				"dont_recompute_tax": 0,
+				"rate": flt(tax.get("rate")),
 			},
 		)
-
-		# Add tax amount
-		tax_account_wise_data[account_head]["tax_amount"] += flt(tax.get("tax_amount"))
-
-		# Parse and update item_wise_tax_detail if present
-		if tax.get("item_wise_tax_detail"):
-			tax_account_wise_data[account_head]["item_wise_tax_detail"].update(tax["item_wise_tax_detail"])
 
 	return list(tax_account_wise_data.values())
 
 
-def consolidate_order_taxes(taxes):
-	tax_account_wise_data = {}
-	for tax in taxes:
-		account_head = tax["account_head"]
-		charge_type = tax["charge_type"]
-		tax_account_wise_data.setdefault(
-			account_head,
-			{
-				"charge_type": charge_type,
-				"account_head": account_head,
-				"description": tax.get("description"),
-				"cost_center": tax.get("cost_center"),
-				"included_in_print_rate": 0,
-				"dont_recompute_tax": 1,
-				"tax_amount": 0,
-				"item_wise_tax_detail": {},
-			},
-		)
-		tax_account_wise_data[account_head]["tax_amount"] += flt(tax.get("tax_amount"))
-		if tax.get("item_wise_tax_detail"):
-			tax_account_wise_data[account_head]["item_wise_tax_detail"].update(tax["item_wise_tax_detail"])
+# -------------------------------------------------------
+# TAX ACCOUNT MAPPING
+# -------------------------------------------------------
 
-	return tax_account_wise_data.values()
-
-
-def get_tax_account_head(tax, charge_type: Optional[Literal["shipping", "sales_tax"]] = None):
+def get_tax_account_head(
+	tax, charge_type: Optional[Literal["shipping", "sales_tax"]] = None
+):
 	tax_title = str(tax.get("title"))
 
 	tax_account_data = frappe.db.get_value(
 		"Shopify Tax Account",
 		{"parent": SETTING_DOCTYPE, "shopify_tax": tax_title},
-		["tax_account", "charge_type","order_sequence"],
+		["tax_account", "charge_type", "order_sequence"],
 		as_dict=True,
 	)
 
@@ -472,86 +441,88 @@ def get_tax_account_head(tax, charge_type: Optional[Literal["shipping", "sales_t
 	order_sequence = tax_account_data.order_sequence if tax_account_data else 0
 
 	if not tax_account and charge_type:
-		tax_account = frappe.db.get_single_value(SETTING_DOCTYPE, DEFAULT_TAX_FIELDS[charge_type])
+		tax_account = frappe.db.get_single_value(
+			SETTING_DOCTYPE, DEFAULT_TAX_FIELDS[charge_type]
+		)
 
 	if not tax_account:
-		frappe.throw(_("Tax Account not specified for Shopify Tax {0}").format(tax.get("title")))
+		frappe.throw(
+			_("Tax Account not specified for Shopify Tax {0}").format(tax_title)
+		)
 
 	return tax_account, chargeable_type, order_sequence
 
 
 def get_tax_account_description(tax):
-	tax_title = tax.get("title")
-
-	tax_description = frappe.db.get_value(
-		"Shopify Tax Account", {"parent": SETTING_DOCTYPE, "shopify_tax": tax_title}, "tax_description",
+	return frappe.db.get_value(
+		"Shopify Tax Account",
+		{"parent": SETTING_DOCTYPE, "shopify_tax": tax.get("title")},
+		"tax_description",
 	)
 
-	return tax_description
 
+# -------------------------------------------------------
+# SHIPPING TAX HANDLING
+# -------------------------------------------------------
 
-def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxes_inclusive=False):
-	"""Shipping lines represents the shipping details,
-	each such shipping detail consists of a list of tax_lines"""
+def update_taxes_with_shipping_lines(
+	taxes, shipping_lines, setting, items, taxes_inclusive=False
+):
 	shipping_as_item = cint(setting.add_shipping_as_item) and setting.shipping_item
+
 	for shipping_charge in shipping_lines:
-		if shipping_charge.get("price"):
-			shipping_discounts = shipping_charge.get("discount_allocations") or []
-			total_discount = sum(flt(discount.get("amount")) for discount in shipping_discounts)
+		shipping_price = flt(shipping_charge.get("price"))
 
-			shipping_taxes = shipping_charge.get("tax_lines") or []
-			total_tax = sum(flt(discount.get("price")) for discount in shipping_taxes)
+		if shipping_price:
+			discounts = shipping_charge.get("discount_allocations") or []
+			total_discount = sum(flt(d.get("amount")) for d in discounts)
 
-			shipping_charge_amount = flt(shipping_charge["price"]) - flt(total_discount)
-			if bool(taxes_inclusive):
-				shipping_charge_amount -= total_tax
+			tax_lines = shipping_charge.get("tax_lines") or []
+			total_tax = sum(flt(t.get("price")) for t in tax_lines)
+
+			shipping_amount = shipping_price - total_discount
+			if taxes_inclusive:
+				shipping_amount -= total_tax
 
 			if shipping_as_item:
-				items.append(
-					{
-						"item_code": setting.shipping_item,
-						"rate": shipping_charge_amount,
-						"delivery_date": items[-1]["delivery_date"] if items else nowdate(),
-						"qty": 1,
-						"stock_uom": "Nos",
-						"warehouse": setting.warehouse,
-					}
-				)
+				items.append({
+					"item_code": setting.shipping_item,
+					"rate": shipping_amount,
+					"qty": 1,
+					"stock_uom": "Nos",
+					"warehouse": setting.warehouse,
+					"delivery_date": items[-1]["delivery_date"] if items else nowdate(),
+				})
 			else:
-				account_head, charge_type, order_sequence = get_tax_account_head(shipping_charge, charge_type="shipping")
-				taxes.append(
-					{
-						"charge_type": charge_type,
-						"account_head": account_head,
-						"order_sequence": order_sequence,
-						"description": get_tax_account_description(shipping_charge) or shipping_charge["title"],
-						"tax_amount": shipping_charge_amount,
-						"cost_center": setting.cost_center,
-						"dont_recompute_tax": 1,
-					}
+				account_head, charge_type, order_sequence = get_tax_account_head(
+					shipping_charge, charge_type="shipping"
 				)
-
-		for tax in shipping_charge.get("tax_lines"):
-			account_head, charge_type, order_sequence = get_tax_account_head(tax, charge_type="sales_tax")
-			taxes.append(
-				{
+				taxes.append({
 					"charge_type": charge_type,
 					"account_head": account_head,
 					"order_sequence": order_sequence,
-					"description": (
-						get_tax_account_description(tax) or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
-					),
-					"tax_amount": tax["price"],
+					"description": get_tax_account_description(shipping_charge)
+						or shipping_charge.get("title"),
+					"rate": 0,
 					"cost_center": setting.cost_center,
-					"item_wise_tax_detail": {
-						setting.shipping_item: [flt(tax.get("rate")) * 100, flt(tax.get("price"))]
-					}
-					if shipping_as_item
-					else {},
-					"dont_recompute_tax": 1,
-				}
-			)
+					"dont_recompute_tax": 0,
+				})
 
+		for tax in shipping_charge.get("tax_lines", []):
+			account_head, charge_type, order_sequence = get_tax_account_head(
+				tax, charge_type="sales_tax"
+			)
+			taxes.append({
+				"charge_type": charge_type,
+				"account_head": account_head,
+				"order_sequence": order_sequence,
+				"description": get_tax_account_description(tax)
+					or f"{tax.get('title')} - {flt(tax.get('rate')) * 100:.2f}%",
+				"rate": flt(tax.get("rate")) * 100,
+				"included_in_print_rate": taxes_inclusive,
+				"cost_center": setting.cost_center,
+				"dont_recompute_tax": 0,
+			})
 
 def get_sales_order(order_id):
 	"""Get ERPNext sales order using shopify order id."""
@@ -646,3 +617,625 @@ def _fetch_old_orders(from_time, to_time):
 			# Using generator instead of fetching all at once is better for
 			# avoiding rate limits and reducing resource usage.
 			yield order.to_dict()
+
+order_data = """{
+    "admin_graphql_api_id": "gid://shopify/Order/7031366549814",
+    "app_id": 234582441985,
+    "billing_address": {
+        "address1": "Ivory court apts, no 4, opp maruti Vidayalya school, babusapalya, prakruthi township, Bangalore",
+        "address2": null,
+        "city": "Bangalore",
+        "company": null,
+        "country": "India",
+        "country_code": "IN",
+        "first_name": "Kishan",
+        "last_name": "Vasudevan",
+        "latitude": 13.0286711,
+        "longitude": 77.65211359999999,
+        "name": "Kishan Vasudevan",
+        "phone": "9845073513",
+        "province": "Karnataka",
+        "province_code": "KA",
+        "zip": "560043"
+    },
+    "browser_ip": null,
+    "buyer_accepts_marketing": true,
+    "cancel_reason": null,
+    "cancelled_at": null,
+    "cart_token": null,
+    "checkout_id": null,
+    "checkout_token": null,
+    "client_details": null,
+    "closed_at": null,
+    "confirmation_number": "80VINXERD",
+    "confirmed": true,
+    "contact_email": "vasudevankishan@gmail.com",
+    "created_at": "2025-12-17T11:11:11+05:30",
+    "currency": "INR",
+    "current_shipping_price_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "current_subtotal_price": "1126.00",
+    "current_subtotal_price_set": {
+        "presentment_money": {
+            "amount": "1126.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "1126.00",
+            "currency_code": "INR"
+        }
+    },
+    "current_total_additional_fees_set": null,
+    "current_total_discounts": "59.00",
+    "current_total_discounts_set": {
+        "presentment_money": {
+            "amount": "59.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "59.00",
+            "currency_code": "INR"
+        }
+    },
+    "current_total_duties_set": null,
+    "current_total_price": "1126.00",
+    "current_total_price_set": {
+        "presentment_money": {
+            "amount": "1126.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "1126.00",
+            "currency_code": "INR"
+        }
+    },
+    "current_total_tax": "53.62",
+    "current_total_tax_set": {
+        "presentment_money": {
+            "amount": "53.62",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "53.62",
+            "currency_code": "INR"
+        }
+    },
+    "customer": {
+        "admin_graphql_api_id": "gid://shopify/Customer/9131913740598",
+        "created_at": "2022-11-11T13:47:12+05:30",
+        "currency": "INR",
+        "default_address": {
+            "address1": "Ivory court apts, no 4, opp maruti Vidayalya school, babusapalya, prakruthi township, Bangalore ",
+            "address2": null,
+            "city": "Bangalore",
+            "company": null,
+            "country": "India",
+            "country_code": "IN",
+            "country_name": "India",
+            "customer_id": 9131913740598,
+            "default": true,
+            "first_name": "Kishan",
+            "id": 11024763322678,
+            "last_name": "Vasudevan",
+            "name": "Kishan Vasudevan",
+            "phone": "9845073513",
+            "province": "Karnataka",
+            "province_code": "KA",
+            "zip": "560043"
+        },
+        "email": "vasudevankishan@gmail.com",
+        "first_name": "Kishan",
+        "id": 9131913740598,
+        "last_name": "Vasudevan",
+        "multipass_identifier": null,
+        "note": null,
+        "phone": "+919845073513",
+        "state": "enabled",
+        "tax_exempt": false,
+        "tax_exemptions": [],
+        "updated_at": "2025-12-17T11:11:12+05:30",
+        "verified_email": true
+    },
+    "customer_locale": null,
+    "device_id": null,
+    "discount_applications": [
+        {
+            "allocation_method": "across",
+            "description": "YourToken Redeemed 59.0 ",
+            "target_selection": "all",
+            "target_type": "line_item",
+            "title": "YourToken Redeemed 59.0 ",
+            "type": "manual",
+            "value": "59.0",
+            "value_type": "fixed_amount"
+        }
+    ],
+    "discount_codes": [
+        {
+            "amount": "59.00",
+            "code": "YourToken Redeemed 59.0 ",
+            "type": "fixed_amount"
+        }
+    ],
+    "duties_included": false,
+    "email": "vasudevankishan@gmail.com",
+    "estimated_taxes": false,
+    "financial_status": "paid",
+    "fulfillment_status": null,
+    "fulfillments": [],
+    "id": 7031366549814,
+    "landing_site": null,
+    "landing_site_ref": null,
+    "line_items": [
+        {
+            "admin_graphql_api_id": "gid://shopify/LineItem/17358225342774",
+            "attributed_staffs": [],
+            "current_quantity": 1,
+            "discount_allocations": [
+                {
+                    "amount": "19.67",
+                    "amount_set": {
+                        "presentment_money": {
+                            "amount": "19.67",
+                            "currency_code": "INR"
+                        },
+                        "shop_money": {
+                            "amount": "19.67",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "discount_application_index": 0
+                }
+            ],
+            "duties": [],
+            "fulfillable_quantity": 1,
+            "fulfillment_service": "manual",
+            "fulfillment_status": null,
+            "gift_card": false,
+            "grams": 0,
+            "id": 17358225342774,
+            "name": "Trimz Quick-Dry Absorption Towel (Green)",
+            "price": "395.00",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "395.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "395.00",
+                    "currency_code": "INR"
+                }
+            },
+            "product_exists": true,
+            "product_id": 10082038153526,
+            "properties": [],
+            "quantity": 1,
+            "requires_shipping": true,
+            "sales_line_item_group_id": null,
+            "sku": "TRZ65GN",
+            "tax_lines": [
+                {
+                    "channel_liable": false,
+                    "price": "53.62",
+                    "price_set": {
+                        "presentment_money": {
+                            "amount": "53.62",
+                            "currency_code": "INR"
+                        },
+                        "shop_money": {
+                            "amount": "53.62",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "rate": 0.05,
+                    "title": "IGST"
+                }
+            ],
+            "taxable": true,
+            "title": "Trimz Quick-Dry Absorption Towel (Green)",
+            "total_discount": "0.00",
+            "total_discount_set": {
+                "presentment_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                }
+            },
+            "variant_id": 51559562019126,
+            "variant_inventory_management": "shopify",
+            "variant_title": null,
+            "vendor": "TRIMZ"
+        },
+        {
+            "admin_graphql_api_id": "gid://shopify/LineItem/17358225375542",
+            "attributed_staffs": [],
+            "current_quantity": 1,
+            "discount_allocations": [
+                {
+                    "amount": "19.67",
+                    "amount_set": {
+                        "presentment_money": {
+                            "amount": "19.67",
+                            "currency_code": "INR"
+                        },
+                        "shop_money": {
+                            "amount": "19.67",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "discount_application_index": 0
+                }
+            ],
+            "duties": [],
+            "fulfillable_quantity": 1,
+            "fulfillment_service": "manual",
+            "fulfillment_status": null,
+            "gift_card": false,
+            "grams": 0,
+            "id": 17358225375542,
+            "name": "Trimz Quick-Dry Absorption Towel (Purple)",
+            "price": "395.00",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "395.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "395.00",
+                    "currency_code": "INR"
+                }
+            },
+            "product_exists": true,
+            "product_id": 10082041594166,
+            "properties": [],
+            "quantity": 1,
+            "requires_shipping": true,
+            "sales_line_item_group_id": null,
+            "sku": "TRZ65PP",
+            "tax_lines": [],
+            "taxable": true,
+            "title": "Trimz Quick-Dry Absorption Towel (Purple)",
+            "total_discount": "0.00",
+            "total_discount_set": {
+                "presentment_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                }
+            },
+            "variant_id": 51559568507190,
+            "variant_inventory_management": "shopify",
+            "variant_title": null,
+            "vendor": "TRIMZ"
+        },
+        {
+            "admin_graphql_api_id": "gid://shopify/LineItem/17358225408310",
+            "attributed_staffs": [],
+            "current_quantity": 1,
+            "discount_allocations": [
+                {
+                    "amount": "19.66",
+                    "amount_set": {
+                        "presentment_money": {
+                            "amount": "19.66",
+                            "currency_code": "INR"
+                        },
+                        "shop_money": {
+                            "amount": "19.66",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "discount_application_index": 0
+                }
+            ],
+            "duties": [],
+            "fulfillable_quantity": 1,
+            "fulfillment_service": "manual",
+            "fulfillment_status": null,
+            "gift_card": false,
+            "grams": 0,
+            "id": 17358225408310,
+            "name": "Trimz Quick-Dry Absorption Towel (Blue)",
+            "price": "395.00",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "395.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "395.00",
+                    "currency_code": "INR"
+                }
+            },
+            "product_exists": true,
+            "product_id": 10082038874422,
+            "properties": [],
+            "quantity": 1,
+            "requires_shipping": true,
+            "sales_line_item_group_id": null,
+            "sku": "TRZ65BL",
+            "tax_lines": [],
+            "taxable": true,
+            "title": "Trimz Quick-Dry Absorption Towel (Blue)",
+            "total_discount": "0.00",
+            "total_discount_set": {
+                "presentment_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                }
+            },
+            "variant_id": 51559563591990,
+            "variant_inventory_management": "shopify",
+            "variant_title": null,
+            "vendor": "TRIMZ"
+        }
+    ],
+    "location_id": null,
+    "merchant_business_entity_id": "MTE3MDg0MDQx",
+    "merchant_of_record_app_id": null,
+    "name": "8337",
+    "note": "",
+    "note_attributes": [
+        {
+            "name": "landing_page",
+            "value": "/"
+        },
+        {
+            "name": "juspay_yourtoken_transaction_id",
+            "value": "3483015"
+        },
+        {
+            "name": "cart_token",
+            "value": "hWN6WYR44VPEPixbW7IAokRo?key=1cf34fa16b2c7268df785abad671a5de"
+        },
+        {
+            "name": "Yourtoken Custom Cart",
+            "value": "true"
+        },
+        {
+            "name": "juspay_yourtoken_discount_given",
+            "value": "59.0"
+        },
+        {
+            "name": "checkout_token",
+            "value": "hWN6WYR44VPEPixbW7IAokRo"
+        },
+        {
+            "name": "PG Transaction Id",
+            "value": "E2512170QSVHQ2"
+        },
+        {
+            "name": "user_ip_address",
+            "value": "49.205.37.85,10.50.16.68"
+        },
+        {
+            "name": "user_agent",
+            "value": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36"
+        },
+        {
+            "name": "Product Suggestions",
+            "value": "51559568507190, 51559563591990"
+        },
+        {
+            "name": "Breeze Order Id",
+            "value": "uMIFwBDGDeOC8x03GvYbp"
+        }
+    ],
+    "number": 7337,
+    "order_number": 8337,
+    "order_status_url": "https://www.abkgrooming.com/17084041/orders/3da397dcf06142142c5d7522d1e8a0bb/authenticate?key=94ef2d976d04d1a4e6b4eabf395d0f06",
+    "original_total_additional_fees_set": null,
+    "original_total_duties_set": null,
+    "payment_gateway_names": [
+        "UPI"
+    ],
+    "payment_terms": null,
+    "phone": "+919845073513",
+    "po_number": null,
+    "presentment_currency": "INR",
+    "processed_at": "2025-12-17T11:11:11+05:30",
+    "reference": null,
+    "referring_site": null,
+    "refunds": [],
+    "returns": [],
+    "shipping_address": {
+        "address1": "Ivory court apts, no 4, opp maruti Vidayalya school, babusapalya, prakruthi township, Bangalore",
+        "address2": null,
+        "city": "Bangalore",
+        "company": null,
+        "country": "India",
+        "country_code": "IN",
+        "first_name": "Kishan",
+        "last_name": "Vasudevan",
+        "latitude": 13.0286711,
+        "longitude": 77.65211359999999,
+        "name": "Kishan Vasudevan",
+        "phone": "9845073513",
+        "province": "Karnataka",
+        "province_code": "KA",
+        "zip": "560043"
+    },
+    "shipping_lines": [
+        {
+            "carrier_identifier": null,
+            "code": "Standard Shipping",
+            "current_discounted_price_set": {
+                "presentment_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                }
+            },
+            "discount_allocations": [],
+            "discounted_price": "0.00",
+            "discounted_price_set": {
+                "presentment_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                }
+            },
+            "id": 5653490467126,
+            "is_removed": false,
+            "phone": null,
+            "price": "0.00",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "0.00",
+                    "currency_code": "INR"
+                }
+            },
+            "requested_fulfillment_service_id": null,
+            "source": "shopify",
+            "tax_lines": [],
+            "title": "Standard Shipping"
+        }
+    ],
+    "source_identifier": "E2512170QSVHQ2",
+    "source_name": "234582441985",
+    "source_url": null,
+    "subtotal_price": "1126.00",
+    "subtotal_price_set": {
+        "presentment_money": {
+            "amount": "1126.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "1126.00",
+            "currency_code": "INR"
+        }
+    },
+    "tags": "breeze, uMIFwBDGDeOC8x03GvYbp",
+    "tax_exempt": false,
+    "tax_lines": [
+        {
+            "channel_liable": false,
+            "price": "53.62",
+            "price_set": {
+                "presentment_money": {
+                    "amount": "53.62",
+                    "currency_code": "INR"
+                },
+                "shop_money": {
+                    "amount": "53.62",
+                    "currency_code": "INR"
+                }
+            },
+            "rate": 0.05,
+            "title": "IGST"
+        }
+    ],
+    "taxes_included": true,
+    "test": false,
+    "token": "3da397dcf06142142c5d7522d1e8a0bb",
+    "total_cash_rounding_payment_adjustment_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_cash_rounding_refund_adjustment_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_discounts": "59.00",
+    "total_discounts_set": {
+        "presentment_money": {
+            "amount": "59.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "59.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_line_items_price": "1185.00",
+    "total_line_items_price_set": {
+        "presentment_money": {
+            "amount": "1185.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "1185.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_outstanding": "0.00",
+    "total_price": "1126.00",
+    "total_price_set": {
+        "presentment_money": {
+            "amount": "1126.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "1126.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_shipping_price_set": {
+        "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "0.00",
+            "currency_code": "INR"
+        }
+    },
+    "total_tax": "53.62",
+    "total_tax_set": {
+        "presentment_money": {
+            "amount": "53.62",
+            "currency_code": "INR"
+        },
+        "shop_money": {
+            "amount": "53.62",
+            "currency_code": "INR"
+        }
+    },
+    "total_tip_received": "0.00",
+    "total_weight": 0,
+    "updated_at": "2025-12-17T11:11:12+05:30",
+    "user_id": null
+}
+
+
+"""
