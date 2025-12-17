@@ -303,82 +303,117 @@ def get_order_taxes(shopify_order, setting, items):
     try:
         unsorted_taxes = []
         line_items = shopify_order.get("line_items", [])
+        taxes_inclusive = bool(shopify_order.get("taxes_included"))
 
-        # Process item-level taxes
+        # -------------------------------
+        # ITEM LEVEL TAXES
+        # -------------------------------
         for line_item in line_items:
             item_code = get_item_code(line_item)
             qty = flt(line_item.get("quantity") or 1)
-            rate = flt(line_item.get("price") or 0)
+
+            # ✅ SINGLE SOURCE OF TRUTH FOR NET RATE
+            net_rate = _get_item_price(line_item, taxes_inclusive)
 
             for tax in line_item.get("tax_lines", []):
-                account_head, charge_type, order_sequence = get_tax_account_head(tax, charge_type="sales_tax")
+                account_head, charge_type, order_sequence = get_tax_account_head(
+                    tax, charge_type="sales_tax"
+                )
 
-                # ✅ Fixed calculation
-                tax_rate = flt(tax.get("rate")) * 100  # percentage
-                tax_amount = flt(rate * qty * tax_rate / 100)
+                tax_rate = flt(tax.get("rate")) * 100  # convert to %
+                tax_amount = flt(net_rate * qty * tax_rate / 100)
 
                 unsorted_taxes.append({
                     "charge_type": charge_type,
                     "account_head": account_head,
                     "order_sequence": order_sequence,
                     "rate": tax_rate,
-                    "description": get_tax_account_description(tax) or f"{tax.get('title')} - {tax_rate:.2f}%",
-                    "tax_amount": tax_amount,  # use calculated value
+                    "description": get_tax_account_description(tax)
+                        or f"{tax.get('title')} - {tax_rate:.2f}%",
+                    "tax_amount": tax_amount,
                     "included_in_print_rate": 0,
                     "cost_center": setting.cost_center,
-                    "item_wise_tax_detail": {item_code: [tax_rate, tax_amount]},
+                    "item_wise_tax_detail": {
+                        item_code: [tax_rate, tax_amount]
+                    },
                     "dont_recompute_tax": 1,
                 })
 
+        # -------------------------------
+        # SHIPPING TAXES
+        # -------------------------------
         if shopify_order.get("shipping_lines"):
             update_taxes_with_shipping_lines(
                 unsorted_taxes,
                 shopify_order.get("shipping_lines", []),
                 setting,
                 items,
-                taxes_inclusive=shopify_order.get("taxes_included"),
+                taxes_inclusive=taxes_inclusive,
             )
         else:
+            # fallback shipping row
             shipping_charge = {"title": "Standard Shipping"}
-            shipping_charge_amount = flt(getattr(setting, "default_shipping_amount", 0.0))
+            shipping_charge_amount = flt(
+                getattr(setting, "default_shipping_amount", 0.0)
+            )
 
             account_head, charge_type, order_sequence = get_tax_account_head(
                 shipping_charge, charge_type="shipping"
             )
 
-            unsorted_taxes.append(
-                {
-                    "charge_type": charge_type,
-                    "account_head": account_head,
-                    "order_sequence": order_sequence,
-                    "rate": 0.0,
-                    "description": get_tax_account_description(shipping_charge) or shipping_charge["title"],
-                    "tax_amount": shipping_charge_amount,
-                    "cost_center": setting.cost_center,
-                    "dont_recompute_tax": 1,
-                }
-            )
+            unsorted_taxes.append({
+                "charge_type": charge_type,
+                "account_head": account_head,
+                "order_sequence": order_sequence,
+                "rate": 0.0,
+                "description": get_tax_account_description(shipping_charge)
+                    or shipping_charge["title"],
+                "tax_amount": shipping_charge_amount,
+                "cost_center": setting.cost_center,
+                "dont_recompute_tax": 1,
+            })
 
+        # -------------------------------
+        # CONSOLIDATION
+        # -------------------------------
         if cint(setting.consolidate_taxes):
             unsorted_taxes = consolidate_order_taxes(unsorted_taxes)
 
         unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
-        sorted_taxes = sorted(unsorted_taxes, key=lambda x: x.get("order_sequence") or 0)
+        sorted_taxes = sorted(
+            unsorted_taxes, key=lambda x: x.get("order_sequence") or 0
+        )
 
+        # -------------------------------
+        # ROW DEPENDENCY FIX
+        # -------------------------------
         last_independent_row_idx = None
-
         for idx, row in enumerate(sorted_taxes):
-            if row["charge_type"] in ["On Previous Row Amount", "On Previous Row Total"]:
-                row["row_id"] = last_independent_row_idx + 1 if last_independent_row_idx is not None else 1
+            if row["charge_type"] in [
+                "On Previous Row Amount",
+                "On Previous Row Total",
+            ]:
+                row["row_id"] = (
+                    last_independent_row_idx + 1
+                    if last_independent_row_idx is not None
+                    else 1
+                )
             else:
                 last_independent_row_idx = idx
 
             if isinstance(row.get("item_wise_tax_detail"), dict):
-                row["item_wise_tax_detail"] = json.dumps(row["item_wise_tax_detail"])
+                row["item_wise_tax_detail"] = json.dumps(
+                    row["item_wise_tax_detail"]
+                )
 
         return sorted_taxes
-    except Exception as e:
-        frappe.log_error(message=frappe.get_traceback(), title="Shopify Order Tax Sync Failed")
+
+    except Exception:
+        frappe.log_error(
+            message=frappe.get_traceback(),
+            title="Shopify Order Tax Sync Failed",
+        )
+
 
 def consolidate_taxes_by_account_head(taxes):
 	tax_account_wise_data = {}
