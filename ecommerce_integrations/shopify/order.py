@@ -300,102 +300,98 @@ def _get_total_discount(line_item) -> float:
 	return sum(flt(discount.get("amount")) for discount in discount_allocations)
 
 
-# -------------------------------------------------------
-# ORDER TAXES
-# -------------------------------------------------------
-
 def get_order_taxes(shopify_order, setting, items):
-	try:
-		unsorted_taxes = []
-		line_items = shopify_order.get("line_items", [])
-		taxes_inclusive = cint(shopify_order.get("taxes_included"))
+    try:
+        unsorted_taxes = []
+        line_items = shopify_order.get("line_items", [])
+        taxes_inclusive = cint(shopify_order.get("taxes_included"))
 
-		# -------------------------------
-		# Line Item Taxes
-		# -------------------------------
-		for line_item in line_items:
-			for tax in line_item.get("tax_lines", []):
-				account_head, charge_type, order_sequence = get_tax_account_head(
-					tax, charge_type="sales_tax"
-				)
+        # -------------------------------
+        # 1️⃣ Line Item Taxes
+        # -------------------------------
+        for line_item in line_items:
+            for tax in line_item.get("tax_lines", []):
+                account_head, charge_type, order_sequence = get_tax_account_head(
+                    tax, charge_type="sales_tax"
+                )
 
-				tax_rate = flt(tax.get("rate")) * 100
+                tax_rate = flt(tax.get("rate")) * 100
 
-				unsorted_taxes.append({
-					"charge_type": charge_type,
-					"account_head": account_head,
-					"order_sequence": order_sequence,
-					"rate": tax_rate,
-					"description": get_tax_account_description(tax)
-						or f"{tax.get('title')} - {tax_rate:.2f}%",
-					"included_in_print_rate": taxes_inclusive,
-					"cost_center": setting.cost_center,
-					"dont_recompute_tax": 0,
-				})
+                unsorted_taxes.append({
+                    "charge_type": charge_type,
+                    "account_head": account_head,
+                    "order_sequence": order_sequence,
+                    "rate": tax_rate,
+                    "description": get_tax_account_description(tax)
+                        or f"{tax.get('title')} - {tax_rate:.2f}%",
+                    "included_in_print_rate": taxes_inclusive,
+                    "cost_center": setting.cost_center,
+                    "dont_recompute_tax": 0,
+                })
 
-		# -------------------------------
-		# Shipping
-		# -------------------------------
-		if shopify_order.get("shipping_lines"):
-			update_taxes_with_shipping_lines(
-				unsorted_taxes,
-				shopify_order.get("shipping_lines", []),
-				setting,
-				items,
-				taxes_inclusive=taxes_inclusive,
-			)
-		else:
-			# fallback shipping row
-			shipping_charge = {"title": "Standard Shipping"}
-			account_head, charge_type, order_sequence = get_tax_account_head(
-				shipping_charge, charge_type="shipping"
-			)
+        # -------------------------------
+        # 2️⃣ Shipping Taxes
+        # -------------------------------
+        shipping_lines = shopify_order.get("shipping_lines") or []
 
-			unsorted_taxes.append({
-				"charge_type": charge_type,
-				"account_head": account_head,
-				"order_sequence": order_sequence,
-				"rate": 0,
-				"description": get_tax_account_description(shipping_charge)
-					or shipping_charge["title"],
-				"cost_center": setting.cost_center,
-				"dont_recompute_tax": 0,
-			})
+        if shipping_lines:
+            update_taxes_with_shipping_lines(
+                unsorted_taxes,
+                shipping_lines,
+                setting,
+                items,
+                taxes_inclusive=taxes_inclusive,
+            )
+        else:
+            # fallback shipping row
+            shipping_charge = {"title": "Standard Shipping"}
+            account_head, charge_type, order_sequence = get_tax_account_head(
+                shipping_charge, charge_type="shipping"
+            )
 
-		# -------------------------------
-		# Consolidation
-		# -------------------------------
-		if cint(setting.consolidate_taxes):
-			unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
+            unsorted_taxes.append({
+                "charge_type": charge_type,
+                "account_head": account_head,
+                "order_sequence": order_sequence,
+                "rate": 0,
+                "description": get_tax_account_description(shipping_charge)
+                    or shipping_charge["title"],
+                "cost_center": setting.cost_center,
+                "dont_recompute_tax": 0,
+            })
 
-		sorted_taxes = sorted(
-			unsorted_taxes, key=lambda x: x.get("order_sequence") or 0
-		)
+        # -------------------------------
+        # 3️⃣ Consolidation & Sorting
+        # -------------------------------
+        if cint(setting.consolidate_taxes):
+            # Consolidate taxes by account head, summing rates, preserving order_sequence
+            unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
 
-		last_independent_row_idx = None
-		for idx, row in enumerate(sorted_taxes):
-			if row["charge_type"] in ("On Previous Row Amount", "On Previous Row Total"):
-				row["row_id"] = (
-					last_independent_row_idx + 1
-					if last_independent_row_idx is not None
-					else 1
-				)
-			else:
-				last_independent_row_idx = idx
+        # Sort strictly by order_sequence for GST template compliance
+        sorted_taxes = sorted(
+            unsorted_taxes, key=lambda x: cint(x.get("order_sequence") or 0)
+        )
 
-		return sorted_taxes
+        # Link dependent tax rows properly (On Previous Row Total / Amount)
+        last_independent_row_idx = None
+        for idx, row in enumerate(sorted_taxes):
+            if row["charge_type"] in ("On Previous Row Amount", "On Previous Row Total"):
+                row["row_id"] = (
+                    last_independent_row_idx + 1
+                    if last_independent_row_idx is not None
+                    else 1
+                )
+            else:
+                last_independent_row_idx = idx
 
-	except Exception:
-		frappe.log_error(
-			message=frappe.get_traceback(),
-			title="Shopify Order Tax Sync Failed",
-		)
-		return []
+        return sorted_taxes
 
-
-# -------------------------------------------------------
-# CONSOLIDATION (NO HARDCODED GST)
-# -------------------------------------------------------
+    except Exception:
+        frappe.log_error(
+            message=frappe.get_traceback(),
+            title="Shopify Order Tax Sync Failed",
+        )
+        return []
 
 def consolidate_taxes_by_account_head(taxes):
 	tax_account_wise_data = {}
@@ -419,38 +415,43 @@ def consolidate_taxes_by_account_head(taxes):
 
 	return list(tax_account_wise_data.values())
 
-
-# -------------------------------------------------------
-# TAX ACCOUNT MAPPING
-# -------------------------------------------------------
-
 def get_tax_account_head(
-	tax, charge_type: Optional[Literal["shipping", "sales_tax"]] = None
+    tax,
+    charge_type: Optional[Literal["shipping", "sales_tax"]] = None
 ):
-	tax_title = str(tax.get("title"))
+    tax_title = tax.get("title")
 
-	tax_account_data = frappe.db.get_value(
-		"Shopify Tax Account",
-		{"parent": SETTING_DOCTYPE, "shopify_tax": tax_title},
-		["tax_account", "charge_type", "order_sequence"],
-		as_dict=True,
-	)
+    tax_account_data = frappe.db.get_value(
+        "Shopify Tax Account",
+        {
+            "parent": SETTING_DOCTYPE,
+            "shopify_tax": tax_title
+        },
+        [
+            "tax_account",
+            "charge_type",
+            "order_sequence"
+        ],
+        as_dict=True
+    )
 
-	tax_account = tax_account_data.tax_account if tax_account_data else None
-	chargeable_type = tax_account_data.charge_type if tax_account_data else "Actual"
-	order_sequence = tax_account_data.order_sequence if tax_account_data else 0
+    if tax_account_data:
+        return (
+            tax_account_data.tax_account,
+            tax_account_data.charge_type or "Actual",
+            cint(tax_account_data.order_sequence),
+        )
 
-	if not tax_account and charge_type:
-		tax_account = frappe.db.get_single_value(
-			SETTING_DOCTYPE, DEFAULT_TAX_FIELDS[charge_type]
-		)
+    # fallback to defaults
+    default_field = DEFAULT_TAX_FIELDS.get(charge_type)
+    tax_account = frappe.db.get_single_value(SETTING_DOCTYPE, default_field)
 
-	if not tax_account:
-		frappe.throw(
-			_("Tax Account not specified for Shopify Tax {0}").format(tax_title)
-		)
+    if not tax_account:
+        frappe.throw(
+            _("No tax account mapped for Shopify Tax: {0}").format(tax_title)
+        )
 
-	return tax_account, chargeable_type, order_sequence
+    return tax_account, "Actual", 0
 
 
 def get_tax_account_description(tax):
@@ -461,68 +462,53 @@ def get_tax_account_description(tax):
 	)
 
 
-# -------------------------------------------------------
-# SHIPPING TAX HANDLING
-# -------------------------------------------------------
-
 def update_taxes_with_shipping_lines(
-	taxes, shipping_lines, setting, items, taxes_inclusive=False
+    taxes,
+    shipping_lines,
+    setting,
+    items,
+    taxes_inclusive=False
 ):
-	shipping_as_item = cint(setting.add_shipping_as_item) and setting.shipping_item
+    shipping_as_item = cint(setting.add_shipping_as_item) and setting.shipping_item
 
-	for shipping_charge in shipping_lines:
-		shipping_price = flt(shipping_charge.get("price"))
+    for shipping in shipping_lines:
+        price = flt(shipping.get("price"))
+        if not price:
+            continue
 
-		if shipping_price:
-			discounts = shipping_charge.get("discount_allocations") or []
-			total_discount = sum(flt(d.get("amount")) for d in discounts)
+        discounts = shipping.get("discount_allocations") or []
+        discount_amount = sum(flt(d.get("amount")) for d in discounts)
 
-			tax_lines = shipping_charge.get("tax_lines") or []
-			total_tax = sum(flt(t.get("price")) for t in tax_lines)
+        tax_lines = shipping.get("tax_lines") or []
+        tax_amount = sum(flt(t.get("price")) for t in tax_lines)
 
-			shipping_amount = shipping_price - total_discount
-			if taxes_inclusive:
-				shipping_amount -= total_tax
+        net_shipping = price - discount_amount
+        if taxes_inclusive:
+            net_shipping -= tax_amount
 
-			if shipping_as_item:
-				items.append({
-					"item_code": setting.shipping_item,
-					"rate": shipping_amount,
-					"qty": 1,
-					"stock_uom": "Nos",
-					"warehouse": setting.warehouse,
-					"delivery_date": items[-1]["delivery_date"] if items else nowdate(),
-				})
-			else:
-				account_head, charge_type, order_sequence = get_tax_account_head(
-					shipping_charge, charge_type="shipping"
-				)
-				taxes.append({
-					"charge_type": charge_type,
-					"account_head": account_head,
-					"order_sequence": order_sequence,
-					"description": get_tax_account_description(shipping_charge)
-						or shipping_charge.get("title"),
-					"rate": 0,
-					"cost_center": setting.cost_center,
-					"dont_recompute_tax": 0,
-				})
+        if shipping_as_item:
+            items.append({
+                "item_code": setting.shipping_item,
+                "qty": 1,
+                "rate": net_shipping,
+                "warehouse": setting.warehouse,
+                "delivery_date": items[-1]["delivery_date"] if items else nowdate(),
+            })
+        else:
+            account_head, charge_type, order_sequence = get_tax_account_head(
+                shipping,
+                charge_type="shipping"
+            )
+            taxes.append({
+                "charge_type": charge_type,
+                "account_head": account_head,
+                "rate": 0,
+                "order_sequence": order_sequence or 1,
+                "description": shipping.get("title"),
+                "cost_center": setting.cost_center,
+                "dont_recompute_tax": 1,
+            })
 
-		for tax in shipping_charge.get("tax_lines", []):
-			account_head, charge_type, order_sequence = get_tax_account_head(
-				tax, charge_type="sales_tax"
-			)
-			taxes.append({
-				"charge_type": charge_type,
-				"account_head": account_head,
-				"order_sequence": order_sequence,
-				"description": get_tax_account_description(tax)
-					or f"{tax.get('title')} - {flt(tax.get('rate')) * 100:.2f}%",
-				"rate": flt(tax.get("rate")) * 100,
-				"included_in_print_rate": taxes_inclusive,
-				"cost_center": setting.cost_center,
-				"dont_recompute_tax": 0,
-			})
 
 def get_sales_order(order_id):
 	"""Get ERPNext sales order using shopify order id."""
