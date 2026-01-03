@@ -1,6 +1,6 @@
 import json
 from typing import Literal, Optional
-from collections import OrderedDict
+
 import frappe
 from frappe import _
 from frappe.contacts.doctype.address.address import get_address_display
@@ -34,7 +34,7 @@ def sync_sales_order(payload, request_id=None):
 	frappe.set_user("Administrator")
 	frappe.flags.request_id = request_id
 
-	if frappe.db.get_value("Sales Order", filters={ORDER_ID_FIELD: cstr(order["id"])}):
+	if frappe.db.get_value("Sales Order", filters={ORDER_ID_FIELD: cstr(order.get("id"))}):
 		create_shopify_log(status="Invalid", message="Sales order already exists, not synced")
 		return
 	try:
@@ -55,8 +55,8 @@ def sync_sales_order(payload, request_id=None):
 		create_order(order, setting)
 	except Exception as e:
 		create_shopify_log(status="Error", exception=e, rollback=True)
-	else:
-		create_shopify_log(status="Success")
+	# else:
+	# 	create_shopify_log(status="Success")
 
 
 def create_order(order, setting, company=None):
@@ -215,6 +215,7 @@ def create_sales_order(shopify_order, setting, company=None):
 			so.update({"company": company, "status": "Draft"})
 		so.flags.ignore_mandatory = True
 		so.flags.shopiy_order_json = json.dumps(shopify_order)
+		so.run_method("calculate_taxes_and_totals")
 		so.save(ignore_permissions=True)
 		# so.submit()
 
@@ -261,59 +262,370 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 
 	return items
 
-def _get_item_price(line_item, taxes_inclusive: bool) -> float:
+
+# def _get_item_price(line_item, taxes_inclusive: bool) -> float:
+
+# 	price = flt(line_item.get("price"))
+# 	qty = cint(line_item.get("quantity"))
+
+# 	# remove line item level discounts
+# 	total_discount = _get_total_discount(line_item)
+
+# 	if not taxes_inclusive:
+# 		return price - (total_discount / qty)
+
+# 	total_taxes = 0.0
+# 	for tax in line_item.get("tax_lines"):
+# 		total_taxes += flt(tax.get("price"))
+
+# 	return price - (total_taxes + total_discount) / qty
+
+def _get_item_price(line_item, taxes_inclusive: bool, all_line_items=None) -> float:
 	"""
-	Calculate the net item price (excluding tax) from Shopify line item.
+	Calculate item price after removing taxes and discounts.
+	Handles:
+	1. Multiple tax rates on same item
+	2. Negative rate scenarios
+	3. Shopify aggregating all taxes on first line item (tax_lines consolidation)
 	
-	For tax-inclusive pricing:
-	- Shopify price includes tax
-	- We need to extract the base price by removing tax component
-	
-	For tax-exclusive pricing:
-	- Shopify price is already the base price
-	- Just apply discounts
+	Args:
+		line_item: Current line item from Shopify
+		taxes_inclusive: Whether prices include tax
+		all_line_items: All line items (to detect tax consolidation scenario)
 	"""
 	price = flt(line_item.get("price"))
-	qty = flt(line_item.get("quantity")) or 1
+	qty = cint(line_item.get("quantity"))
 	
-	# Apply line item discount
-	total_discount = flt(line_item.get("total_discount") or 0)
-	discount_per_qty = total_discount / qty
-	discounted_price = price - discount_per_qty
+	if qty == 0:
+		return 0.0
+
+	# Get total discount allocated to this line item
+	total_discount = _get_total_discount(line_item)
+
+	if not taxes_inclusive:
+		return price - (total_discount / qty)
+
+	# Get tax rate instead of absolute tax amount
+	tax_rate = _get_effective_tax_rate(line_item, all_line_items)
 	
-	# Get tax lines
-	tax_lines = line_item.get("tax_lines") or []
+	# Apply reverse calculation: price_excl_tax = (price_incl_tax - discount) / (1 + tax_rate)
+	price_after_discount = price - total_discount
+	calculated_rate = price_after_discount / (1 + tax_rate) if tax_rate > 0 else price_after_discount
 	
-	# If tax-exclusive or no taxes, return discounted price as-is
-	if not taxes_inclusive or not tax_lines:
-		return discounted_price
-	
-	# Tax-inclusive: need to extract base price
-	# Calculate total tax rate from all tax lines
-	total_tax_rate = sum(flt(t.get("rate")) for t in tax_lines) * 100
-	
-	if total_tax_rate > 0:
-		# Formula: base_price = gross_price / (1 + tax_rate/100)
-		# Or: base_price = gross_price * 100 / (100 + tax_rate)
-		base_price = discounted_price * 100 / (100 + total_tax_rate)
-		return flt(base_price)
-	
-	# Fallback: if no valid tax rate found, try calculating from tax amounts
-	total_tax_amount = sum(flt(t.get("price")) for t in tax_lines) / qty
-	base_price = discounted_price - total_tax_amount
-	
-	# Safety check: base price should never be negative
-	if base_price < 0:
-		frappe.log_error(
-			f"Negative base price calculated for item {line_item.get('sku')}: "
-			f"Price={price}, Discount={discount_per_qty}, Tax={total_tax_amount}",
-			"Shopify Item Price Calculation Error"
+	# Handle negative rate scenario - fallback to tax template
+	if calculated_rate < 0:
+		sku = line_item.get("sku")
+		
+		# Try to get tax rate from Item Tax Template
+		tax_template = frappe.db.get_value(
+			"Item Tax",
+			{"parent": sku},
+			"item_tax_template"
 		)
-		# Fallback to discounted price
-		return discounted_price
-	frappe.log_error("Shopify Item Price Calculation",f"Item base price calculated for item {line_item.get('sku')}: "
-			f"Price={price}, Discount={discount_per_qty}, Tax={total_tax_amount}")
-	return flt(base_price)
+		
+		if tax_template:
+			template_tax_rate = frappe.db.get_value(
+				"Item Tax Template",
+				{"name": tax_template, "disabled": 0},
+				"gst_rate"
+			)
+			
+			if template_tax_rate:
+				calculated_rate = price_after_discount / (1 + (template_tax_rate / 100))
+			else:
+				calculated_rate = price_after_discount
+		else:
+			calculated_rate = price_after_discount
+	
+	return max(0.0, calculated_rate / qty)  # Per unit rate
+
+
+def _get_effective_tax_rate(line_item, all_line_items=None):
+	"""
+	Calculate the effective tax rate for a line item.
+	
+	Handles Shopify's behavior of consolidating all order taxes 
+	onto the first line item's tax_lines array.
+	
+	Strategy:
+	1. If line item has tax_lines, calculate rate from those
+	2. If empty but other items have taxes, check if first item has consolidated taxes
+	3. If consolidated, distribute the rate proportionally
+	4. Fallback to Item Tax Template rate
+	"""
+	tax_lines = line_item.get("tax_lines", [])
+	
+	# Case 1: Line item has its own tax_lines
+	if tax_lines:
+		# Check if this appears to be consolidated taxes (total tax >> item tax)
+		total_tax_amount = sum(flt(tax.get("price", 0)) for tax in tax_lines)
+		item_price = flt(line_item.get("price"))
+		item_discount = _get_total_discount(line_item)
+		taxable_amount = item_price - item_discount
+		
+		# If tax amount seems reasonable for this item alone, use the rate from tax_lines
+		if total_tax_amount <= taxable_amount * 0.30:  # Max 30% tax rate check
+			# Calculate weighted average tax rate from all tax lines
+			total_rate = sum(flt(tax.get("rate", 0)) for tax in tax_lines)
+			return total_rate
+		
+		# Otherwise, taxes are consolidated - need to find the actual rate
+		if all_line_items:
+			return _calculate_distributed_tax_rate(line_item, all_line_items)
+	
+	# Case 2: No tax_lines - check for consolidation scenario
+	if all_line_items and not tax_lines:
+		# Check if first item has all the taxes
+		first_item = all_line_items[0] if all_line_items else None
+		if first_item and first_item.get("tax_lines"):
+			# Use the rate from first item's tax_lines
+			first_item_tax_lines = first_item.get("tax_lines", [])
+			total_rate = sum(flt(tax.get("rate", 0)) for tax in first_item_tax_lines)
+			return total_rate
+	
+	# Case 3: Fallback to Item Tax Template
+	sku = line_item.get("sku")
+	if sku:
+		tax_template = frappe.db.get_value(
+			"Item Tax",
+			{"parent": sku},
+			"item_tax_template"
+		)
+		
+		if tax_template:
+			tax_rate = frappe.db.get_value(
+				"Item Tax Template",
+				{"name": tax_template, "disabled": 0},
+				"gst_rate"
+			)
+			if tax_rate:
+				return tax_rate / 100  # Convert percentage to decimal
+	
+	# Default: assume 0% tax
+	return 0.0
+
+
+def _calculate_distributed_tax_rate(line_item, all_line_items):
+	"""
+	Calculate tax rate when Shopify consolidates all taxes on first item.
+	
+	Logic:
+	1. Get total order tax from first item's tax_lines
+	2. Calculate total taxable amount (all items - discounts)
+	3. Derive effective tax rate = total_tax / total_taxable_amount
+	"""
+	first_item = all_line_items[0]
+	first_item_taxes = first_item.get("tax_lines", [])
+	
+	if not first_item_taxes:
+		return 0.0
+	
+	# Get total tax amount from first item
+	total_order_tax = sum(flt(tax.get("price", 0)) for tax in first_item_taxes)
+	
+	# Calculate total taxable amount across all items
+	total_taxable_amount = 0.0
+	for item in all_line_items:
+		item_price = flt(item.get("price", 0))
+		item_discount = _get_total_discount(item)
+		total_taxable_amount += (item_price - item_discount)
+	
+	if total_taxable_amount == 0:
+		return 0.0
+	
+	# Calculate effective tax rate
+	effective_tax_rate = total_order_tax / total_taxable_amount
+	
+	return effective_tax_rate
+
+
+def get_order_taxes(shopify_order, setting, items):
+	"""
+	Extract and consolidate taxes from Shopify order.
+	Handles multiple tax rates per item and proper sequencing.
+	"""
+	try:
+		unsorted_taxes = []
+		line_items = shopify_order.get("line_items", [])
+
+		# Process line item taxes
+		for line_item in line_items:
+			item_code = get_item_code(line_item)
+			
+			for tax in line_item.get("tax_lines", []):
+				account_head, charge_type, order_sequence = get_tax_account_head(
+					tax, 
+					charge_type="sales_tax"
+				)
+
+				tax_rate = flt(tax.get("rate")) * 100
+				tax_amount = flt(tax.get("price"))
+				tax_title = tax.get("title", "")
+
+				# Create description with tax rate
+				description = (
+					get_tax_account_description(tax) or 
+					f"{tax_title} - {tax_rate:.2f}%"
+				)
+
+				unsorted_taxes.append({
+					"charge_type": charge_type,
+					"account_head": account_head,
+					"order_sequence": order_sequence,
+					"rate": tax_rate,
+					"description": description,
+					"tax_amount": tax_amount,
+					"included_in_print_rate": 1 if shopify_order.get("taxes_included") else 0,
+					"cost_center": setting.cost_center,
+					"item_wise_tax_detail": {item_code: [tax_rate, tax_amount]},
+					"dont_recompute_tax": 1,
+				})
+
+		# Process shipping charges
+		if shopify_order.get("shipping_lines"):
+			update_taxes_with_shipping_lines(
+				unsorted_taxes,
+				shopify_order.get("shipping_lines", []),
+				setting,
+				items,
+				taxes_inclusive=shopify_order.get("taxes_included"),
+			)
+		else:
+			# Add default shipping if configured
+			shipping_charge_amount = flt(getattr(setting, "default_shipping_amount", 0.0))
+			
+			if shipping_charge_amount > 0:
+				shipping_charge = {"title": "Standard Shipping"}
+				account_head, charge_type, order_sequence = get_tax_account_head(
+					shipping_charge, 
+					charge_type="shipping"
+				)
+
+				unsorted_taxes.append({
+					"charge_type": charge_type,
+					"account_head": account_head,
+					"order_sequence": order_sequence,
+					"description": shipping_charge["title"],
+					"tax_amount": shipping_charge_amount,
+					"cost_center": setting.cost_center,
+					"dont_recompute_tax": 1,
+				})
+
+		# Consolidate taxes if setting is enabled
+		if cint(setting.consolidate_taxes):
+			unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
+		else:
+			unsorted_taxes = consolidate_taxes_by_account_head(unsorted_taxes)
+
+		# Sort taxes by order sequence
+		sorted_taxes = sorted(unsorted_taxes, key=lambda x: x.get("order_sequence", 0))
+
+		# Set row_id for dependent tax rows
+		last_independent_row_idx = None
+		for idx, row in enumerate(sorted_taxes):
+			if row["charge_type"] in ["On Previous Row Amount", "On Previous Row Total"]:
+				row["row_id"] = (last_independent_row_idx + 1) if last_independent_row_idx is not None else 1
+			else:
+				last_independent_row_idx = idx
+
+			# Convert item_wise_tax_detail dict to JSON string
+			if isinstance(row.get("item_wise_tax_detail"), dict):
+				row["item_wise_tax_detail"] = json.dumps(row["item_wise_tax_detail"])
+
+		return sorted_taxes
+		
+	except Exception:
+		frappe.log_error(
+			message=frappe.get_traceback(),
+			title="Shopify Order Tax Sync Failed"
+		)
+		raise
+
+
+def consolidate_taxes_by_account_head(taxes):
+	"""
+	Consolidate multiple tax entries with same account head.
+	Properly handles tax rates for IGST, CGST, SGST.
+	"""
+	tax_account_wise_data = {}
+	
+	for tax in taxes:
+		account_head = tax["account_head"]
+		charge_type = tax["charge_type"]
+		
+		# Determine tax rate based on account head name
+		if "IGST" in account_head.upper():
+			default_tax_rate = 18.0
+		elif "CGST" in account_head.upper() or "SGST" in account_head.upper():
+			default_tax_rate = 9.0
+		else:
+			default_tax_rate = tax.get("rate", 0.0)
+		
+		# Initialize if not exists
+		if account_head not in tax_account_wise_data:
+			tax_account_wise_data[account_head] = {
+				"charge_type": charge_type,
+				"account_head": account_head,
+				"description": tax.get("description", account_head),
+				"cost_center": tax.get("cost_center"),
+				"order_sequence": tax.get("order_sequence", 0),
+				"included_in_print_rate": tax.get("included_in_print_rate", 0),
+				"dont_recompute_tax": 1,
+				"tax_amount": 0,
+				"rate": default_tax_rate,
+				"item_wise_tax_detail": {},
+			}
+		
+		# Accumulate tax amount
+		tax_account_wise_data[account_head]["tax_amount"] += flt(tax.get("tax_amount", 0))
+		
+		# Merge item_wise_tax_detail
+		if tax.get("item_wise_tax_detail"):
+			current_detail = tax_account_wise_data[account_head]["item_wise_tax_detail"]
+			new_detail = tax["item_wise_tax_detail"]
+			
+			for item_code, tax_data in new_detail.items():
+				if item_code in current_detail:
+					# Accumulate if item already exists
+					current_detail[item_code][1] += tax_data[1]  # Add tax amount
+				else:
+					current_detail[item_code] = tax_data
+	
+	return list(tax_account_wise_data.values())
+
+
+def validate_tax_calculations(shopify_order, sales_order_doc):
+	"""
+	Validate that calculated taxes match Shopify order taxes.
+	Log discrepancies for review.
+	"""
+	shopify_total_tax = flt(shopify_order.get("current_total_tax", 0))
+	erp_total_tax = sales_order_doc.total_taxes_and_charges
+	
+	difference = abs(shopify_total_tax - erp_total_tax)
+	
+	# Allow 1 INR difference for rounding
+	if difference > 1.0:
+		error_msg = f"""
+		Tax Mismatch Detected:
+		Order: {shopify_order.get("name")}
+		Shopify Total Tax: {shopify_total_tax}
+		ERP Total Tax: {erp_total_tax}
+		Difference: {difference}
+		"""
+		frappe.log_error(
+			message=error_msg,
+			title=f"Tax Validation Failed - Order {shopify_order.get('name')}"
+		)
+		
+		# Add comment to Sales Order
+		sales_order_doc.add_comment(
+			"Comment",
+			f"⚠️ Tax mismatch: Shopify={shopify_total_tax}, ERP={erp_total_tax}, Diff={difference}"
+		)
+	
+	return difference <= 1.0
+
 
 
 def _get_total_discount(line_item) -> float:
@@ -321,323 +633,45 @@ def _get_total_discount(line_item) -> float:
 	return sum(flt(discount.get("amount")) for discount in discount_allocations)
 
 
-def get_order_taxes(shopify_order, setting, items):
-	try:
-		taxes = []
-		taxes_inclusive = shopify_order.get("taxes_included", False)
-		line_items = shopify_order.get("line_items", [])
-
-		# Collect taxes from line items
-		tax_map = {}  # {tax_title: {rate, account_head, items: {}, total_amount}}
-		
-		# Check if Shopify has aggregated all taxes in first item
-		# This happens when first item has tax_lines but others don't
-		first_item_has_taxes = bool(line_items and line_items[0].get("tax_lines"))
-		other_items_have_taxes = any(
-			bool(item.get("tax_lines")) 
-			for item in line_items[1:] if item.get("taxable", True)
-		)
-		
-		# If first item has taxes but others don't, taxes are aggregated
-		taxes_are_aggregated = first_item_has_taxes and not other_items_have_taxes
-		
-		if taxes_are_aggregated:
-			# Use order-level tax_lines and distribute proportionally to ALL items
-			order_tax_lines = shopify_order.get("tax_lines", [])
-			
-			for line_item in line_items:
-				item_code = get_item_code(line_item)
-				
-				# Skip non-taxable items
-				if not line_item.get("taxable", True):
-					continue
-				
-				# Get item quantity
-				item_qty = flt(line_item.get("quantity", 1))
-				
-				# Get discount allocated to this item
-				discount_allocations = line_item.get("discount_allocations", [])
-				item_discount = sum(flt(d.get("amount")) for d in discount_allocations)
-				
-				# Get net price per unit (after discount, excluding tax if inclusive)
-				# But for tax calculation, we need gross amount after discount
-				item_price = flt(line_item.get("price"))
-				net_item_amount = (item_price * item_qty) - item_discount
-				
-				# Apply each order-level tax to this item
-				for order_tax in order_tax_lines:
-					tax_title = order_tax.get("title")
-					shopify_tax_rate = flt(order_tax.get("rate")) * 100
-					
-					# Calculate tax for this item
-					if taxes_inclusive:
-						# Tax included: extract tax from gross amount after discount
-						item_tax_amount = net_item_amount * shopify_tax_rate / (100 + shopify_tax_rate)
-					else:
-						# Tax exclusive: calculate on net amount after discount
-						item_tax_amount = net_item_amount * shopify_tax_rate / 100
-					
-					if tax_title not in tax_map:
-						account_head, charge_type, order_sequence = get_tax_account_head(
-							order_tax, charge_type="sales_tax"
-						)
-						# Get display rate: IGST=18, CGST=9, SGST=9
-						display_rate = get_display_tax_rate(tax_title) or shopify_tax_rate
-						
-						tax_map[tax_title] = {
-							"tax_title": tax_title,
-							"rate": display_rate,
-							"shopify_rate": shopify_tax_rate,
-							"account_head": account_head,
-							"charge_type": charge_type or "On Previous Row Total",
-							"order_sequence": order_sequence,
-							"description": (
-								get_tax_account_description(order_tax)
-								or f"{tax_title} @ {display_rate:.2f}%"
-							),
-							"total_tax_amount": 0,
-							"items": {}
-						}
-					
-					# Add this item's tax
-					tax_map[tax_title]["items"][item_code] = [shopify_tax_rate, item_tax_amount]
-					tax_map[tax_title]["total_tax_amount"] += item_tax_amount
-		else:
-			# Normal flow: process taxes from line items as before
-			# First pass: collect explicit taxes from line items
-			items_with_taxes = set()
-			for line_item in line_items:
-				item_code = get_item_code(line_item)
-				tax_lines = line_item.get("tax_lines", [])
-				
-				if tax_lines:
-					items_with_taxes.add(item_code)
-					for tax in tax_lines:
-						tax_title = tax.get("title")
-						shopify_tax_rate = flt(tax.get("rate")) * 100  # Shopify's rate (e.g., 5%)
-						tax_amount = flt(tax.get("price"))
-						
-						if tax_title not in tax_map:
-							account_head, charge_type, order_sequence = get_tax_account_head(
-								tax, charge_type="sales_tax"
-							)
-							# Get display rate: IGST=18, CGST=9, SGST=9
-							display_rate = get_display_tax_rate(tax_title) or shopify_tax_rate
-							
-							tax_map[tax_title] = {
-								"tax_title": tax_title,
-								"rate": display_rate,  # Fixed rate (18 for IGST, 9 for CGST/SGST)
-								"shopify_rate": shopify_tax_rate,  # Shopify's actual rate (e.g., 5%)
-								"account_head": account_head,
-								"charge_type": charge_type or "On Previous Row Total",
-								"order_sequence": order_sequence,
-								"description": (
-									get_tax_account_description(tax)
-									or f"{tax.get('title')} @ {display_rate:.2f}%"
-								),
-								"total_tax_amount": 0,
-								"items": {}
-							}
-						
-						# Add item's tax with Shopify's rate
-						tax_map[tax_title]["items"][item_code] = [shopify_tax_rate, tax_amount]
-						tax_map[tax_title]["total_tax_amount"] += tax_amount
-		
-		# Second pass: handle items without explicit tax_lines (only in normal flow)
-		if not taxes_are_aggregated:
-			order_tax_lines = shopify_order.get("tax_lines", [])
-			for line_item in line_items:
-				item_code = get_item_code(line_item)
-				
-				# Skip items that already have taxes
-				if item_code in items_with_taxes:
-					continue
-				
-				# Skip non-taxable items
-				if not line_item.get("taxable", True):
-					continue
-				
-				# Get item quantity
-				item_qty = flt(line_item.get("quantity", 1))
-				
-				# Get discount allocated to this item
-				discount_allocations = line_item.get("discount_allocations", [])
-				item_discount = sum(flt(d.get("amount")) for d in discount_allocations)
-				
-				# Get net price per unit (after discount, excluding tax if inclusive)
-				# For tax calculation, we need gross amount after discount
-				item_price = flt(line_item.get("price"))
-				net_item_amount = (item_price * item_qty) - item_discount
-				
-				# Apply each order-level tax to this item
-				for order_tax in order_tax_lines:
-					tax_title = order_tax.get("title")
-					shopify_tax_rate = flt(order_tax.get("rate")) * 100
-					
-					# Calculate tax for this item
-					if taxes_inclusive:
-						# Tax included: extract tax from gross amount after discount
-						item_tax_amount = net_item_amount * shopify_tax_rate / (100 + shopify_tax_rate)
-					else:
-						# Tax exclusive: calculate on net amount after discount
-						item_tax_amount = net_item_amount * shopify_tax_rate / 100
-					
-					if tax_title not in tax_map:
-						account_head, charge_type, order_sequence = get_tax_account_head(
-							order_tax, charge_type="sales_tax"
-						)
-						# Get display rate: IGST=18, CGST=9, SGST=9
-						display_rate = get_display_tax_rate(tax_title) or shopify_tax_rate
-						
-						tax_map[tax_title] = {
-							"tax_title": tax_title,
-							"rate": display_rate,  # Fixed rate (18 for IGST, 9 for CGST/SGST)
-							"shopify_rate": shopify_tax_rate,  # Shopify's actual rate
-							"account_head": account_head,
-							"charge_type": charge_type or "On Previous Row Total",
-							"order_sequence": order_sequence,
-							"description": (
-								get_tax_account_description(order_tax)
-								or f"{tax_title} @ {display_rate:.2f}%"
-							),
-							"total_tax_amount": 0,
-							"items": {}
-						}
-					
-					# Add this item's tax with Shopify's rate
-					tax_map[tax_title]["items"][item_code] = [shopify_tax_rate, item_tax_amount]
-					tax_map[tax_title]["total_tax_amount"] += item_tax_amount
-
-		# Convert tax_map to taxes list
-		for tax_data in tax_map.values():
-			# For tax-inclusive, use display rate in item_wise_tax_detail
-			# For tax-exclusive, use shopify rate
-			rate_for_items = tax_data["rate"] if taxes_inclusive else tax_data["shopify_rate"]
-			
-			# Adjust item_wise_tax_detail to use correct rate
-			adjusted_items = {}
-			for item_code, (shopify_rate, tax_amount) in tax_data["items"].items():
-				adjusted_items[item_code] = [rate_for_items, tax_amount]
-			
-			taxes.append({
-				"charge_type": tax_data["charge_type"],
-				"account_head": tax_data["account_head"],
-				"description": tax_data["description"],
-				"rate": tax_data["rate"],
-				"tax_amount": tax_data["total_tax_amount"],
-				"cost_center": setting.cost_center,
-				"order_sequence": tax_data["order_sequence"],
-				"item_wise_tax_detail": adjusted_items,
-				"included_in_print_rate": 1 if taxes_inclusive else 0,
-				"dont_recompute_tax": 1,
-			})
-
-		# Add shipping taxes
-		if shopify_order.get("shipping_lines"):
-			update_taxes_with_shipping_lines(
-				taxes,
-				shopify_order["shipping_lines"],
-				setting,
-				items,
-				taxes_inclusive,
-			)
-
-		# Consolidate if needed
-		if cint(setting.consolidate_taxes):
-			taxes = consolidate_order_taxes(taxes)
-
-		# Sort by order_sequence
-		taxes = sorted(taxes, key=lambda x: x.get("order_sequence", 0))
-
-		# Apply ERPNext tax row rules
-		for idx, row in enumerate(taxes, start=1):
-			row["idx"] = idx
-			
-			# First row is always "Actual" with no row_id
-			if idx == 1:
-				row["charge_type"] = "Actual"
-				row["row_id"] = None
-			else:
-				# Subsequent rows are "On Previous Row Total" referencing row 1
-				if row["charge_type"] != "Actual":
-					row["charge_type"] = "On Previous Row Total"
-				row["row_id"] = "1"
-			
-			# Convert item_wise_tax_detail to JSON
-			tax_detail = row.get("item_wise_tax_detail")
-			if isinstance(tax_detail, dict):
-				row["item_wise_tax_detail"] = json.dumps(tax_detail)
-		frappe.log_error("Taxes Calcualtion",taxes)
-		return taxes
-
-	except Exception:
-		frappe.log_error(frappe.get_traceback(), "Shopify Order Tax Sync Failed")
-		return []
-
-
 def consolidate_order_taxes(taxes):
-	"""Consolidate taxes by account_head"""
 	tax_account_wise_data = {}
-	
 	for tax in taxes:
 		account_head = tax["account_head"]
-		
-		if account_head not in tax_account_wise_data:
-			tax_account_wise_data[account_head] = {
-				"charge_type": tax.get("charge_type", "On Previous Row Total"),
+		charge_type = tax["charge_type"]
+		tax_account_wise_data.setdefault(
+			account_head,
+			{
+				"charge_type": charge_type,
 				"account_head": account_head,
 				"description": tax.get("description"),
 				"cost_center": tax.get("cost_center"),
-				"rate": flt(tax.get("rate")),
-				"order_sequence": tax.get("order_sequence", 0),
-				"included_in_print_rate": tax.get("included_in_print_rate", 0),
+				"included_in_print_rate": 0,
 				"dont_recompute_tax": 1,
 				"tax_amount": 0,
 				"item_wise_tax_detail": {},
-			}
-		
-		# Accumulate tax amount
+			},
+		)
 		tax_account_wise_data[account_head]["tax_amount"] += flt(tax.get("tax_amount"))
-		
-		# Merge item_wise_tax_detail
 		if tax.get("item_wise_tax_detail"):
-			item_wise = tax["item_wise_tax_detail"]
-			existing_detail = tax_account_wise_data[account_head]["item_wise_tax_detail"]
-			
-			for item_code, tax_detail in item_wise.items():
-				if item_code in existing_detail:
-					# Sum the tax amounts for same item
-					existing_detail[item_code] = [
-						tax_detail[0],  # rate stays same
-						existing_detail[item_code][1] + tax_detail[1]  # sum amounts
-					]
-				else:
-					existing_detail[item_code] = tax_detail
-	
-	return list(tax_account_wise_data.values())
+			tax_account_wise_data[account_head]["item_wise_tax_detail"].update(tax["item_wise_tax_detail"])
+
+	return tax_account_wise_data.values()
 
 
 def get_tax_account_head(tax, charge_type: Optional[Literal["shipping", "sales_tax"]] = None):
-	"""Get tax account head, charge type, and order sequence"""
 	tax_title = str(tax.get("title"))
 
 	tax_account_data = frappe.db.get_value(
 		"Shopify Tax Account",
 		{"parent": SETTING_DOCTYPE, "shopify_tax": tax_title},
-		["tax_account", "charge_type", "order_sequence"],
+		["tax_account", "charge_type","order_sequence"],
 		as_dict=True,
 	)
 
-	if tax_account_data:
-		tax_account = tax_account_data.tax_account
-		chargeable_type = tax_account_data.charge_type or "On Previous Row Total"
-		order_sequence = tax_account_data.order_sequence or 0
-	else:
-		tax_account = None
-		chargeable_type = "On Previous Row Total"
-		order_sequence = 0
+	tax_account = tax_account_data.tax_account if tax_account_data else None
+	chargeable_type = tax_account_data.charge_type if tax_account_data else "Actual"
+	order_sequence = tax_account_data.order_sequence if tax_account_data else 0
 
-	# Fallback to default tax account
 	if not tax_account and charge_type:
 		tax_account = frappe.db.get_single_value(SETTING_DOCTYPE, DEFAULT_TAX_FIELDS[charge_type])
 
@@ -647,150 +681,77 @@ def get_tax_account_head(tax, charge_type: Optional[Literal["shipping", "sales_t
 	return tax_account, chargeable_type, order_sequence
 
 
-def get_display_tax_rate(tax_title):
-	"""
-	Get the display tax rate for ERPNext based on tax title.
-	IGST = 18%, CGST = 9%, SGST = 9%
-	"""
-	tax_title_upper = tax_title.upper()
-	
-	if "IGST" in tax_title_upper:
-		return 18.0
-	elif "CGST" in tax_title_upper:
-		return 9.0
-	elif "SGST" in tax_title_upper:
-		return 9.0
-	else:
-		# For other taxes, return None to use Shopify's rate
-		return None
-
-
 def get_tax_account_description(tax):
-	"""Get custom tax description if configured"""
 	tax_title = tax.get("title")
 
 	tax_description = frappe.db.get_value(
-		"Shopify Tax Account",
-		{"parent": SETTING_DOCTYPE, "shopify_tax": tax_title},
-		"tax_description",
+		"Shopify Tax Account", {"parent": SETTING_DOCTYPE, "shopify_tax": tax_title}, "tax_description",
 	)
-	
+
 	return tax_description
 
 
 def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxes_inclusive=False):
-	"""
-	Add shipping charges and taxes.
-	Shipping charge becomes first row (Actual), taxes reference it.
-	"""
+	"""Shipping lines represents the shipping details,
+	each such shipping detail consists of a list of tax_lines"""
 	shipping_as_item = cint(setting.add_shipping_as_item) and setting.shipping_item
-
 	for shipping_charge in shipping_lines:
-		if not shipping_charge.get("price"):
-			continue
+		if shipping_charge.get("price"):
+			shipping_discounts = shipping_charge.get("discount_allocations") or []
+			total_discount = sum(flt(discount.get("amount")) for discount in shipping_discounts)
 
-		# Calculate shipping amount
-		shipping_discounts = shipping_charge.get("discount_allocations") or []
-		total_discount = sum(flt(d.get("amount")) for d in shipping_discounts)
+			shipping_taxes = shipping_charge.get("tax_lines") or []
+			total_tax = sum(flt(discount.get("price")) for discount in shipping_taxes)
 
-		shipping_taxes = shipping_charge.get("tax_lines") or []
-		total_tax = sum(flt(t.get("price")) for t in shipping_taxes)
+			shipping_charge_amount = flt(shipping_charge["price"]) - flt(total_discount)
+			if bool(taxes_inclusive):
+				shipping_charge_amount -= total_tax
 
-		shipping_charge_amount = flt(shipping_charge["price"]) - total_discount
-
-		# Remove tax if inclusive
-		if taxes_inclusive:
-			shipping_charge_amount -= total_tax
-
-		# Add shipping as item or as charge
-		if shipping_as_item:
-			items.append({
-				"item_code": setting.shipping_item,
-				"rate": shipping_charge_amount,
-				"delivery_date": items[-1]["delivery_date"] if items else nowdate(),
-				"qty": 1,
-				"stock_uom": "Nos",
-				"warehouse": setting.warehouse,
-			})
-		else:
-			# Add shipping charge (will become first row with "Actual")
-			# Always add, even if amount is 0
-			account_head, charge_type, order_sequence = get_tax_account_head(
-				shipping_charge, charge_type="shipping"
-			)
-			
-			# Shipping charge should have order_sequence=0 to appear first
-			taxes.append({
-				"charge_type": "Actual",  # Will be enforced as first row
-				"account_head": account_head,
-				"description": (
-					get_tax_account_description(shipping_charge)
-					or shipping_charge.get("title")
-					or "Shipping Charges"
-				),
-				"rate": 0.0,
-				"tax_amount": shipping_charge_amount,
-				"cost_center": setting.cost_center,
-				"order_sequence": 0,  # Ensure it appears first
-				"item_wise_tax_detail": {},
-				"dont_recompute_tax": 0,
-			})
-
-		# Add shipping taxes (IGST or SGST+CGST)
-		for tax in shipping_taxes:
-			account_head, charge_type, order_sequence = get_tax_account_head(
-				tax, charge_type="sales_tax"
-			)
-
-			shopify_tax_rate = flt(tax.get("rate")) * 100
-			tax_title = tax.get("title")
-			display_rate = get_display_tax_rate(tax_title) or shopify_tax_rate
-			tax_amount = flt(tax.get("price"))
-
-			# Find if this tax already exists in taxes list
-			existing_tax = None
-			for existing in taxes:
-				if existing.get("account_head") == account_head:
-					existing_tax = existing
-					break
-			
-			if existing_tax:
-				# Add to existing tax entry
-				existing_tax["tax_amount"] += tax_amount
-				
-				# Add to item_wise_tax_detail if shipping_as_item
-				if shipping_as_item:
-					item_wise = existing_tax.get("item_wise_tax_detail", {})
-					# Use display rate (not shopify rate) for tax-inclusive
-					rate_to_use = display_rate if taxes_inclusive else shopify_tax_rate
-					if setting.shipping_item in item_wise:
-						item_wise[setting.shipping_item][1] += tax_amount
-					else:
-						item_wise[setting.shipping_item] = [rate_to_use, tax_amount]
-					existing_tax["item_wise_tax_detail"] = item_wise
+			if shipping_as_item:
+				items.append(
+					{
+						"item_code": setting.shipping_item,
+						"rate": shipping_charge_amount,
+						"delivery_date": items[-1]["delivery_date"] if items else nowdate(),
+						"qty": 1,
+						"stock_uom": "Nos",
+						"warehouse": setting.warehouse,
+					}
+				)
 			else:
-				# Create new tax entry
-				# Use display rate (not shopify rate) for tax-inclusive
-				rate_for_item_wise = display_rate if taxes_inclusive else shopify_tax_rate
-				
-				taxes.append({
-					"charge_type": charge_type or "On Previous Row Total",
-					"account_head": account_head,
-					"description": (
-						get_tax_account_description(tax)
-						or f"{tax.get('title')} @ {display_rate:.2f}%"
-					),
-					"rate": display_rate,  # Fixed rate (18 for IGST, 9 for CGST/SGST)
-					"tax_amount": tax_amount,
-					"cost_center": setting.cost_center,
-					"order_sequence": order_sequence,
-					"item_wise_tax_detail": {
-						setting.shipping_item: [rate_for_item_wise, tax_amount]
-					} if shipping_as_item else {},
-					"included_in_print_rate": 1 if taxes_inclusive else 0,
-					"dont_recompute_tax": 1,
-				})
+				account_head, charge_type, order_sequence = get_tax_account_head(shipping_charge, charge_type="shipping")
+				taxes.append(
+					{
+						"charge_type": charge_type,
+						"account_head": account_head,
+						"order_sequence": order_sequence,
+						"description": get_tax_account_description(shipping_charge) or shipping_charge["title"],
+						"tax_amount": shipping_charge_amount,
+						"cost_center": setting.cost_center,
+						"dont_recompute_tax": 1,
+					}
+				)
 
+		for tax in shipping_charge.get("tax_lines"):
+			account_head, charge_type, order_sequence = get_tax_account_head(tax, charge_type="sales_tax")
+			taxes.append(
+				{
+					"charge_type": charge_type,
+					"account_head": account_head,
+					"order_sequence": order_sequence,
+					"description": (
+						get_tax_account_description(tax) or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
+					),
+					"tax_amount": tax["price"],
+					"cost_center": setting.cost_center,
+					"item_wise_tax_detail": {
+						setting.shipping_item: [flt(tax.get("rate")) * 100, flt(tax.get("price"))]
+					}
+					if shipping_as_item
+					else {},
+					"dont_recompute_tax": 1,
+				}
+			)
 
 def get_sales_order(order_id):
 	"""Get ERPNext sales order using shopify order id."""
@@ -885,3 +846,750 @@ def _fetch_old_orders(from_time, to_time):
 			# Using generator instead of fetching all at once is better for
 			# avoiding rate limits and reducing resource usage.
 			yield order.to_dict()
+
+order = """
+{
+	"admin_graphql_api_id": "gid://shopify/Order/7051312038198",
+	"app_id": 234582441985,
+	"billing_address": {
+		"address1": "F15 Master of grooming ground floor F-block Moti Nagar near Aggarwal eye Hospital",
+		"address2": null,
+		"city": "WEST",
+		"company": null,
+		"country": "India",
+		"country_code": "IN",
+		"first_name": "Bunny",
+		"last_name": ".",
+		"latitude": 28.6652164,
+		"longitude": 77.13784369999999,
+		"name": "Bunny .",
+		"phone": "9999925269",
+		"province": "Delhi",
+		"province_code": "DL",
+		"zip": "110015"
+	},
+	"browser_ip": null,
+	"buyer_accepts_marketing": true,
+	"cancel_reason": null,
+	"cancelled_at": null,
+	"cart_token": null,
+	"checkout_id": null,
+	"checkout_token": null,
+	"client_details": null,
+	"closed_at": null,
+	"confirmation_number": "UUK440ZUK",
+	"confirmed": true,
+	"contact_email": "masterofgrooming@gmail.com",
+	"created_at": "2025-12-27T23:12:07+05:30",
+	"currency": "INR",
+	"current_shipping_price_set": {
+		"presentment_money": {
+			"amount": "0.00",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "0.00",
+			"currency_code": "INR"
+		}
+	},
+	"current_subtotal_price": "16634.52",
+	"current_subtotal_price_set": {
+		"presentment_money": {
+			"amount": "16634.52",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "16634.52",
+			"currency_code": "INR"
+		}
+	},
+	"current_total_additional_fees_set": null,
+	"current_total_discounts": "733.48",
+	"current_total_discounts_set": {
+		"presentment_money": {
+			"amount": "733.48",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "733.48",
+			"currency_code": "INR"
+		}
+	},
+	"current_total_duties_set": null,
+	"current_total_price": "16634.52",
+	"current_total_price_set": {
+		"presentment_money": {
+			"amount": "16634.52",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "16634.52",
+			"currency_code": "INR"
+		}
+	},
+	"current_total_tax": "2556.93",
+	"current_total_tax_set": {
+		"presentment_money": {
+			"amount": "2556.93",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "2556.93",
+			"currency_code": "INR"
+		}
+	},
+	"customer": {
+		"admin_graphql_api_id": "gid://shopify/Customer/9943491182902",
+		"created_at": "2025-12-27T21:44:55+05:30",
+		"currency": "INR",
+		"default_address": {
+			"address1": "F15 Master of grooming ground floor F-block Moti Nagar near Aggarwal eye Hospital",
+			"address2": null,
+			"city": "WEST",
+			"company": null,
+			"country": "India",
+			"country_code": "IN",
+			"country_name": "India",
+			"customer_id": 9943491182902,
+			"default": true,
+			"first_name": "Bunny",
+			"id": 11670110077238,
+			"last_name": ".",
+			"name": "Bunny .",
+			"phone": "9999925269",
+			"province": "Delhi",
+			"province_code": "DL",
+			"zip": "110015"
+		},
+		"email": "masterofgrooming@gmail.com",
+		"first_name": "Bunny",
+		"id": 9943491182902,
+		"last_name": ".",
+		"multipass_identifier": null,
+		"note": null,
+		"phone": "+919999925269",
+		"state": "enabled",
+		"tax_exempt": false,
+		"tax_exemptions": [],
+		"updated_at": "2025-12-27T23:12:08+05:30",
+		"verified_email": true
+	},
+	"customer_locale": null,
+	"device_id": null,
+	"discount_applications": [
+		{
+			"allocation_method": "across",
+			"description": "Get Free Gift @395",
+			"target_selection": "explicit",
+			"target_type": "line_item",
+			"title": "Get Free Gift @395",
+			"type": "manual",
+			"value": "394.0",
+			"value_type": "fixed_amount"
+		},
+		{
+			"allocation_method": "across",
+			"description": "PREPAID2 ",
+			"target_selection": "all",
+			"target_type": "line_item",
+			"title": "PREPAID2 ",
+			"type": "manual",
+			"value": "339.48",
+			"value_type": "fixed_amount"
+		}
+	],
+	"discount_codes": [
+		{
+			"amount": "339.48",
+			"code": "PREPAID2 ",
+			"type": "fixed_amount"
+		}
+	],
+	"duties_included": false,
+	"email": "masterofgrooming@gmail.com",
+	"estimated_taxes": false,
+	"financial_status": "paid",
+	"fulfillment_status": null,
+	"fulfillments": [],
+	"id": 7051312038198,
+	"landing_site": null,
+	"landing_site_ref": null,
+	"line_items": [
+		{
+			"admin_graphql_api_id": "gid://shopify/LineItem/17399664673078",
+			"attributed_staffs": [],
+			"current_quantity": 1,
+			"discount_allocations": [
+				{
+					"amount": "394.00",
+					"amount_set": {
+						"presentment_money": {
+							"amount": "394.00",
+							"currency_code": "INR"
+						},
+						"shop_money": {
+							"amount": "394.00",
+							"currency_code": "INR"
+						}
+					},
+					"discount_application_index": 0
+				},
+				{
+					"amount": "0.02",
+					"amount_set": {
+						"presentment_money": {
+							"amount": "0.02",
+							"currency_code": "INR"
+						},
+						"shop_money": {
+							"amount": "0.02",
+							"currency_code": "INR"
+						}
+					},
+					"discount_application_index": 1
+				}
+			],
+			"duties": [],
+			"fulfillable_quantity": 1,
+			"fulfillment_service": "manual",
+			"fulfillment_status": null,
+			"gift_card": false,
+			"grams": 0,
+			"id": 17399664673078,
+			"name": "Trimz Quick-Dry Absorption Towel (Green)",
+			"price": "395.00",
+			"price_set": {
+				"presentment_money": {
+					"amount": "395.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "395.00",
+					"currency_code": "INR"
+				}
+			},
+			"product_exists": true,
+			"product_id": 10082038153526,
+			"properties": [
+				{
+					"name": "_yt_coupon_template_id",
+					"value": "3864"
+				},
+				{
+					"name": "_isYtFreebie",
+					"value": "true"
+				},
+				{
+					"name": "_yt_allowed_variants",
+					"value": "[\"51559562019126\"]"
+				}
+			],
+			"quantity": 1,
+			"requires_shipping": true,
+			"sales_line_item_group_id": null,
+			"sku": "TRZ65GN",
+			"tax_lines": [
+				{
+					"channel_liable": false,
+					"price": "2538.49",
+					"price_set": {
+						"presentment_money": {
+							"amount": "2538.49",
+							"currency_code": "INR"
+						},
+						"shop_money": {
+							"amount": "2538.49",
+							"currency_code": "INR"
+						}
+					},
+					"rate": 0.18,
+					"title": "IGST"
+				},
+				{
+					"channel_liable": false,
+					"price": "18.44",
+					"price_set": {
+						"presentment_money": {
+							"amount": "18.44",
+							"currency_code": "INR"
+						},
+						"shop_money": {
+							"amount": "18.44",
+							"currency_code": "INR"
+						}
+					},
+					"rate": 0.05,
+					"title": "IGST"
+				}
+			],
+			"taxable": true,
+			"title": "Trimz Quick-Dry Absorption Towel (Green)",
+			"total_discount": "394.00",
+			"total_discount_set": {
+				"presentment_money": {
+					"amount": "394.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "394.00",
+					"currency_code": "INR"
+				}
+			},
+			"variant_id": 51559562019126,
+			"variant_inventory_management": "shopify",
+			"variant_title": null,
+			"vendor": "TRIMZ"
+		},
+		{
+			"admin_graphql_api_id": "gid://shopify/LineItem/17399664705846",
+			"attributed_staffs": [],
+			"current_quantity": 1,
+			"discount_allocations": [
+				{
+					"amount": "269.02",
+					"amount_set": {
+						"presentment_money": {
+							"amount": "269.02",
+							"currency_code": "INR"
+						},
+						"shop_money": {
+							"amount": "269.02",
+							"currency_code": "INR"
+						}
+					},
+					"discount_application_index": 1
+				}
+			],
+			"duties": [],
+			"fulfillable_quantity": 1,
+			"fulfillment_service": "manual",
+			"fulfillment_status": null,
+			"gift_card": false,
+			"grams": 0,
+			"id": 17399664705846,
+			"name": "Aeolian Blaster Single Motor Pet Dryer",
+			"price": "13451.00",
+			"price_set": {
+				"presentment_money": {
+					"amount": "13451.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "13451.00",
+					"currency_code": "INR"
+				}
+			},
+			"product_exists": true,
+			"product_id": 3882507206679,
+			"properties": [],
+			"quantity": 1,
+			"requires_shipping": true,
+			"sales_line_item_group_id": null,
+			"sku": "TD-901GT",
+			"tax_lines": [],
+			"taxable": true,
+			"title": "Aeolian Blaster Single Motor Pet Dryer",
+			"total_discount": "0.00",
+			"total_discount_set": {
+				"presentment_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				}
+			},
+			"variant_id": 29231447113751,
+			"variant_inventory_management": "shopify",
+			"variant_title": null,
+			"vendor": "AEOLUS"
+		},
+		{
+			"admin_graphql_api_id": "gid://shopify/LineItem/17399664738614",
+			"attributed_staffs": [],
+			"current_quantity": 1,
+			"discount_allocations": [
+				{
+					"amount": "38.94",
+					"amount_set": {
+						"presentment_money": {
+							"amount": "38.94",
+							"currency_code": "INR"
+						},
+						"shop_money": {
+							"amount": "38.94",
+							"currency_code": "INR"
+						}
+					},
+					"discount_application_index": 1
+				}
+			],
+			"duties": [],
+			"fulfillable_quantity": 1,
+			"fulfillment_service": "manual",
+			"fulfillment_status": null,
+			"gift_card": false,
+			"grams": 0,
+			"id": 17399664738614,
+			"name": "Aeolus Ultimate Nail Grinder",
+			"price": "1947.00",
+			"price_set": {
+				"presentment_money": {
+					"amount": "1947.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "1947.00",
+					"currency_code": "INR"
+				}
+			},
+			"product_exists": true,
+			"product_id": 9973654323510,
+			"properties": [],
+			"quantity": 1,
+			"requires_shipping": true,
+			"sales_line_item_group_id": null,
+			"sku": "NG-103",
+			"tax_lines": [],
+			"taxable": true,
+			"title": "Aeolus Ultimate Nail Grinder",
+			"total_discount": "0.00",
+			"total_discount_set": {
+				"presentment_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				}
+			},
+			"variant_id": 51267055059254,
+			"variant_inventory_management": "shopify",
+			"variant_title": null,
+			"vendor": "AEOLUS"
+		},
+		{
+			"admin_graphql_api_id": "gid://shopify/LineItem/17399664771382",
+			"attributed_staffs": [],
+			"current_quantity": 1,
+			"discount_allocations": [
+				{
+					"amount": "31.50",
+					"amount_set": {
+						"presentment_money": {
+							"amount": "31.50",
+							"currency_code": "INR"
+						},
+						"shop_money": {
+							"amount": "31.50",
+							"currency_code": "INR"
+						}
+					},
+					"discount_application_index": 1
+				}
+			],
+			"duties": [],
+			"fulfillable_quantity": 1,
+			"fulfillment_service": "manual",
+			"fulfillment_status": null,
+			"gift_card": false,
+			"grams": 0,
+			"id": 17399664771382,
+			"name": "Opawz Permanent Pet Hair Dye, 150 gm (Cobalt Blue)",
+			"price": "1575.00",
+			"price_set": {
+				"presentment_money": {
+					"amount": "1575.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "1575.00",
+					"currency_code": "INR"
+				}
+			},
+			"product_exists": true,
+			"product_id": 10081962885430,
+			"properties": [],
+			"quantity": 1,
+			"requires_shipping": true,
+			"sales_line_item_group_id": null,
+			"sku": "O-94154",
+			"tax_lines": [],
+			"taxable": true,
+			"title": "Opawz Permanent Pet Hair Dye, 150 gm (Cobalt Blue)",
+			"total_discount": "0.00",
+			"total_discount_set": {
+				"presentment_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				}
+			},
+			"variant_id": 51559390478646,
+			"variant_inventory_management": "shopify",
+			"variant_title": null,
+			"vendor": "OPAWZ"
+		}
+	],
+	"location_id": null,
+	"merchant_business_entity_id": "MTE3MDg0MDQx",
+	"merchant_of_record_app_id": null,
+	"name": "8387",
+	"note": "",
+	"note_attributes": [
+		{
+			"name": "landing_page",
+			"value": "/"
+		},
+		{
+			"name": "cart_token",
+			"value": "hWN6v7peVShmuBrXaj95MJSm?key=21cf1bd7de232d191280ca5363881621"
+		},
+		{
+			"name": "Yourtoken Custom Cart",
+			"value": "true"
+		},
+		{
+			"name": "wvi",
+			"value": "1"
+		},
+		{
+			"name": "checkout_token",
+			"value": "hWN6vGdmifMrWjBhHzWShiD3"
+		},
+		{
+			"name": "PG Transaction Id",
+			"value": "E2512270RAEBD3"
+		},
+		{
+			"name": "user_ip_address",
+			"value": "152.58.119.139,10.50.16.35"
+		},
+		{
+			"name": "user_agent",
+			"value": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1"
+		},
+		{
+			"name": "Breeze Order Id",
+			"value": "N7JKbcJ9hLohrxMU5h7bK"
+		}
+	],
+	"number": 7387,
+	"order_number": 8387,
+	"order_status_url": "https://www.abkgrooming.com/17084041/orders/b598dc69e5caf119f5f4bec055570162/authenticate?key=f010e6e0d0011b31e0fcc92aa6d1379d",
+	"original_total_additional_fees_set": null,
+	"original_total_duties_set": null,
+	"payment_gateway_names": [
+		"CARD | CREDIT"
+	],
+	"payment_terms": null,
+	"phone": "+919999925269",
+	"po_number": null,
+	"presentment_currency": "INR",
+	"processed_at": "2025-12-27T23:12:07+05:30",
+	"reference": null,
+	"referring_site": null,
+	"refunds": [],
+	"returns": [],
+	"shipping_address": {
+		"address1": "F15 Master of grooming ground floor F-block Moti Nagar near Aggarwal eye Hospital",
+		"address2": null,
+		"city": "WEST",
+		"company": null,
+		"country": "India",
+		"country_code": "IN",
+		"first_name": "Bunny",
+		"last_name": ".",
+		"latitude": 28.6652164,
+		"longitude": 77.13784369999999,
+		"name": "Bunny .",
+		"phone": "9999925269",
+		"province": "Delhi",
+		"province_code": "DL",
+		"zip": "110015"
+	},
+	"shipping_lines": [
+		{
+			"carrier_identifier": null,
+			"code": "Standard Shipping",
+			"current_discounted_price_set": {
+				"presentment_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				}
+			},
+			"discount_allocations": [],
+			"discounted_price": "0.00",
+			"discounted_price_set": {
+				"presentment_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				}
+			},
+			"id": 5669621268790,
+			"is_removed": false,
+			"phone": null,
+			"price": "0.00",
+			"price_set": {
+				"presentment_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "0.00",
+					"currency_code": "INR"
+				}
+			},
+			"requested_fulfillment_service_id": null,
+			"source": "shopify",
+			"tax_lines": [],
+			"title": "Standard Shipping"
+		}
+	],
+	"source_identifier": "E2512270RAEBD3",
+	"source_name": "234582441985",
+	"source_url": null,
+	"subtotal_price": "16634.52",
+	"subtotal_price_set": {
+		"presentment_money": {
+			"amount": "16634.52",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "16634.52",
+			"currency_code": "INR"
+		}
+	},
+	"tags": "breeze, N7JKbcJ9hLohrxMU5h7bK",
+	"tax_exempt": false,
+	"tax_lines": [
+		{
+			"channel_liable": false,
+			"price": "2538.49",
+			"price_set": {
+				"presentment_money": {
+					"amount": "2538.49",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "2538.49",
+					"currency_code": "INR"
+				}
+			},
+			"rate": 0.18,
+			"title": "IGST"
+		},
+		{
+			"channel_liable": false,
+			"price": "18.44",
+			"price_set": {
+				"presentment_money": {
+					"amount": "18.44",
+					"currency_code": "INR"
+				},
+				"shop_money": {
+					"amount": "18.44",
+					"currency_code": "INR"
+				}
+			},
+			"rate": 0.05,
+			"title": "IGST"
+		}
+	],
+	"taxes_included": true,
+	"test": false,
+	"token": "b598dc69e5caf119f5f4bec055570162",
+	"total_cash_rounding_payment_adjustment_set": {
+		"presentment_money": {
+			"amount": "0.00",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "0.00",
+			"currency_code": "INR"
+		}
+	},
+	"total_cash_rounding_refund_adjustment_set": {
+		"presentment_money": {
+			"amount": "0.00",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "0.00",
+			"currency_code": "INR"
+		}
+	},
+	"total_discounts": "733.48",
+	"total_discounts_set": {
+		"presentment_money": {
+			"amount": "733.48",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "733.48",
+			"currency_code": "INR"
+		}
+	},
+	"total_line_items_price": "17368.00",
+	"total_line_items_price_set": {
+		"presentment_money": {
+			"amount": "17368.00",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "17368.00",
+			"currency_code": "INR"
+		}
+	},
+	"total_outstanding": "0.00",
+	"total_price": "16634.52",
+	"total_price_set": {
+		"presentment_money": {
+			"amount": "16634.52",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "16634.52",
+			"currency_code": "INR"
+		}
+	},
+	"total_shipping_price_set": {
+		"presentment_money": {
+			"amount": "0.00",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "0.00",
+			"currency_code": "INR"
+		}
+	},
+	"total_tax": "2556.93",
+	"total_tax_set": {
+		"presentment_money": {
+			"amount": "2556.93",
+			"currency_code": "INR"
+		},
+		"shop_money": {
+			"amount": "2556.93",
+			"currency_code": "INR"
+		}
+	},
+	"total_tip_received": "0.00",
+	"total_weight": 0,
+	"updated_at": "2025-12-27T23:12:08+05:30",
+	"user_id": null
+}
+"""
