@@ -16,8 +16,7 @@
    "fieldname": "shopify_tax",
    "fieldtype": "Data",
    "in_list_view": 1,
-   "label": "Shopify Tax/Shipping Title",
-   "reqd": 1
+   "label": "Shopify Tax/Shipping Title"
   },
   {
    "fieldname": "column_break_2",
@@ -28,8 +27,7 @@
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "ERPNext Account",
-   "options": "Account",
-   "reqd": 1
+   "options": "Account"
   },
   {
    "fieldname": "tax_description",
@@ -42,26 +40,25 @@
    "fieldname": "charge_type",
    "fieldtype": "Select",
    "label": "Type",
-   "options": "\nActual\nOn Net Total\nOn Previous Row Amount\nOn Previous Row Total\nOn Item Quantity",
-   "reqd": 1
+   "options": "\nActual\nOn Net Total\nOn Previous Row Amount\nOn Previous Row Total\nOn Item Quantity"
   },
   {
    "fieldname": "order_sequence",
    "fieldtype": "Int",
    "label": "Order Sequence",
-   "non_negative": 1,
-   "reqd": 1
+   "non_negative": 1
   }
  ],
  "istable": 1,
  "links": [],
- "modified": "2025-05-15 18:37:25.954915",
+ "modified": "2026-02-24 13:08:28.977967",
  "modified_by": "Administrator",
  "module": "shopify",
  "name": "Shopify Tax Account",
  "owner": "Administrator",
  "permissions": [],
  "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": []
